@@ -13,6 +13,19 @@ const { sendPurchase } = require('./capi');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const app = express();
+
+// CORS: autoriza requisições do /collect vindas de qualquer origem.
+// O /collect só grava dados de tracking (não expõe leitura), então liberar
+// a origem é seguro aqui e resolve o "blocked:origin" do sendBeacon/fetch.
+app.use(function (req, res, next) {
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
