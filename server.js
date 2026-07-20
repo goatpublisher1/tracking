@@ -26,7 +26,8 @@ app.use(function (req, res, next) {
   next();
 });
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '1mb', type: ['application/json', 'text/plain'] }));
+app.use(express.text({ limit: '1mb', type: 'text/*' }));
 app.use(express.urlencoded({ extended: true }));
 
 // resolve o funil ativo por domínio (host) — usado no /collect
@@ -54,10 +55,18 @@ async function funnelByPixel(pixelId) {
 // ---------------------------------------------------------------------
 app.post('/collect', async (req, res) => {
   try {
-    const b = req.body || {};
+    // parsing robusto: sendBeacon pode chegar como objeto já parseado,
+    // como string JSON, ou como Buffer. Cobrimos os três casos.
+    let b = req.body || {};
+    if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
+    else if (Buffer.isBuffer(b)) { try { b = JSON.parse(b.toString('utf8')); } catch (e) { b = {}; } }
+
     const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
     const funnel = await funnelByDomain(host);
-    if (!b.sck) return res.status(400).json({ error: 'missing sck' });
+    if (!b.sck) {
+      console.log('collect sem sck. body recebido:', JSON.stringify(req.body).slice(0, 200));
+      return res.status(400).json({ error: 'missing sck' });
+    }
 
     // grava/atualiza o store (equivale ao Stape Store Writer) — chave = sck
     await pool.query(
@@ -112,11 +121,17 @@ app.post('/webhook/payt', async (req, res) => {
     // valida origem pelo integration_key contra o segredo do funil (se houver)
     let funnel = null;
     if (p?.pixel_id) funnel = await funnelByPixel(p.pixel_id);
-    // fallback: se o webhook não traz pixel, tenta pelo src -> store -> funnel
+    // fallback 1: pelo sck -> store -> funnel
     if (!funnel && sck) {
       const s = await pool.query('SELECT funnel_id FROM store WHERE sck=$1', [sck]);
       if (s.rows[0]?.funnel_id)
         funnel = (await pool.query('SELECT * FROM funnels WHERE id=$1', [s.rows[0].funnel_id])).rows[0];
+    }
+    // fallback 2: se ainda não achou e existe apenas UM funil ativo, usa ele.
+    // (cobre vendas cujo sck não casou com o store, ex.: teste direto no checkout)
+    if (!funnel) {
+      const act = await pool.query('SELECT * FROM funnels WHERE active');
+      if (act.rows.length === 1) funnel = act.rows[0];
     }
 
     // sempre grava a venda (mesmo não-paid) para o painel/atribuição
@@ -174,6 +189,12 @@ app.post('/webhook/payt', async (req, res) => {
         `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
          VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
         ['purchase_' + txId, src, funnel.id, r.httpStatus, JSON.stringify(r.payload)]
+      );
+    } else if (paid && !funnel) {
+      // pago mas sem funil resolvido: registra o motivo para diagnóstico
+      await pool.query(
+        `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
+        ['{"skipped":"funnel_nao_resolvido"}', txId]
       );
     }
 
