@@ -130,14 +130,16 @@ app.post('/webhook/payt', async (req, res) => {
     // fallback 2: pelo product_code (tabela products) — resolve vendas sem sck
     // e tambem classifica o tipo de oferta (principal/upsell/backend/...)
     let offerType = null;
+    let sendToMeta = true;  // padrao: envia (produto nao cadastrado = envia)
     const prodCode = p?.product?.code;
     if (prodCode) {
       const pr = await pool.query(
-        `SELECT pr.offer_type, f.* FROM products pr
+        `SELECT pr.offer_type, pr.send_to_meta, f.* FROM products pr
          JOIN funnels f ON f.slug = pr.funnel_slug
          WHERE pr.product_code = $1 AND pr.active AND f.active LIMIT 1`, [prodCode]);
       if (pr.rows[0]) {
         offerType = pr.rows[0].offer_type;
+        sendToMeta = pr.rows[0].send_to_meta !== false;
         if (!funnel) funnel = pr.rows[0];
       }
     }
@@ -194,7 +196,10 @@ app.post('/webhook/payt', async (req, res) => {
     );
 
     // dispara CAPI para CADA pixel ativo do domínio (multi-conta)
-    if (paid && funnels.length) {
+    // Só envia se o produto estiver marcado com send_to_meta = true.
+    // Upsell/backend ficam registrados no banco mas nao vao para a Meta,
+    // para nao inflar a otimizacao das campanhas.
+    if (paid && funnels.length && sendToMeta) {
       const sale = {
         transaction_id: txId,
         value,
@@ -223,6 +228,12 @@ app.post('/webhook/payt', async (req, res) => {
       await pool.query(
         `UPDATE sales SET capi_sent=$1, capi_response=$2 WHERE transaction_id=$3`,
         [algumOk, JSON.stringify(resultados), txId]
+      );
+    } else if (paid && !sendToMeta) {
+      // venda registrada de proposito sem envio a Meta (upsell/backend)
+      await pool.query(
+        `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
+        ['{"skipped":"produto_nao_envia_meta"}', txId]
       );
     } else if (paid && !funnels.length) {
       // pago mas sem funil resolvido: registra o motivo para diagnóstico
