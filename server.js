@@ -127,8 +127,22 @@ app.post('/webhook/payt', async (req, res) => {
       if (s.rows[0]?.funnel_id)
         funnel = (await pool.query('SELECT * FROM funnels WHERE id=$1', [s.rows[0].funnel_id])).rows[0];
     }
-    // fallback 2: se ainda não achou e existe apenas UM funil ativo, usa ele.
-    // (cobre vendas cujo sck não casou com o store, ex.: teste direto no checkout)
+    // fallback 2: pelo product_code (tabela products) — resolve vendas sem sck
+    // e tambem classifica o tipo de oferta (principal/upsell/backend/...)
+    let offerType = null;
+    const prodCode = p?.product?.code;
+    if (prodCode) {
+      const pr = await pool.query(
+        `SELECT pr.offer_type, f.* FROM products pr
+         JOIN funnels f ON f.slug = pr.funnel_slug
+         WHERE pr.product_code = $1 AND pr.active AND f.active LIMIT 1`, [prodCode]);
+      if (pr.rows[0]) {
+        offerType = pr.rows[0].offer_type;
+        if (!funnel) funnel = pr.rows[0];
+      }
+    }
+
+    // fallback 3: se ainda não achou e existe apenas UM funil ativo, usa ele.
     if (!funnel) {
       const act = await pool.query('SELECT * FROM funnels WHERE active');
       if (act.rows.length === 1) funnel = act.rows[0];
@@ -168,14 +182,15 @@ app.post('/webhook/payt', async (req, res) => {
     await pool.query(
       `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
          currency, product_code, product_name, customer_email, customer_phone,
-         utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-       ON CONFLICT (transaction_id) DO UPDATE SET status=EXCLUDED.status`,
+         utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       ON CONFLICT (transaction_id) DO UPDATE SET status=EXCLUDED.status,
+         offer_type=COALESCE(EXCLUDED.offer_type, sales.offer_type)`,
       [txId, (sck || 'purchase_' + txId), sck, src, (p?.transaction?.payment_status || p?.status),
        value, total, funnel?.currency || 'BRL',
        p?.product?.code, p?.product?.name, p?.customer?.email, p?.customer?.phone,
        click?.utm_source, click?.utm_campaign, click?.campaign_id,
-       click?.adset_id, click?.ad_id, funnel ? funnel.id : null]
+       click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType]
     );
 
     // dispara CAPI para CADA pixel ativo do domínio (multi-conta)
@@ -226,6 +241,13 @@ app.post('/webhook/payt', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// registra as rotas de API do dashboard (/api/*)
+const { registerApi } = require('./api');
+registerApi(app, pool);
+
+// serve o dashboard (página estática) em /dashboard
+const path = require('path');
+app.get('/dashboard', (_req, res) => res.sendFile(path.join(__dirname, 'dashboard.html')));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('tracking service on :' + PORT));
