@@ -252,13 +252,6 @@ app.post('/webhook/payt', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// registra as rotas de API do dashboard (/api/*)
-const { registerApi } = require('./api');
-registerApi(app, pool);
-
-// serve o dashboard (página estática) em /dashboard
-const path = require('path');
-app.get('/dashboard', (_req, res) => res.sendFile(path.join(__dirname, 'dashboard.html')));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('tracking service on :' + PORT));
