@@ -134,6 +134,15 @@ app.post('/webhook/payt', async (req, res) => {
       if (act.rows.length === 1) funnel = act.rows[0];
     }
 
+    // MULTI-PIXEL: reúne TODOS os funis ativos do mesmo domínio do funil achado.
+    // Permite ter 2+ pixels (ex.: 2 contas de anúncios) recebendo o mesmo Purchase.
+    let funnels = [];
+    if (funnel) {
+      const all = await pool.query(
+        'SELECT * FROM funnels WHERE active AND domain = $1', [funnel.domain]);
+      funnels = all.rows.length ? all.rows : [funnel];
+    }
+
     // sempre grava a venda (mesmo não-paid) para o painel/atribuição
     // value = comissão do PRODUTOR (busca por type, não índice fixo)
     const producerComm = Array.isArray(p?.commission)
@@ -169,8 +178,8 @@ app.post('/webhook/payt', async (req, res) => {
        click?.adset_id, click?.ad_id, funnel ? funnel.id : null]
     );
 
-    // só dispara CAPI se pago e temos funil (pixel+token)
-    if (paid && funnel) {
+    // dispara CAPI para CADA pixel ativo do domínio (multi-conta)
+    if (paid && funnels.length) {
       const sale = {
         transaction_id: txId,
         value,
@@ -180,17 +189,27 @@ app.post('/webhook/payt', async (req, res) => {
         customer_phone: p?.customer?.phone,
         customer_name: p?.customer?.name,
       };
-      const r = await sendPurchase({ funnel, sale, store });
+      const resultados = [];
+      for (const f of funnels) {
+        try {
+          const r = await sendPurchase({ funnel: f, sale, store });
+          resultados.push({ pixel: f.pixel_id, status: r.httpStatus, resp: r.response });
+          await pool.query(
+            `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
+             VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
+            [(sck || 'purchase_' + txId), src, f.id, r.httpStatus, JSON.stringify(r.payload)]
+          );
+        } catch (err) {
+          resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });
+        }
+      }
+      // capi_sent = true se PELO MENOS um pixel aceitou
+      const algumOk = resultados.some(r => r.status === 200);
       await pool.query(
         `UPDATE sales SET capi_sent=$1, capi_response=$2 WHERE transaction_id=$3`,
-        [r.httpStatus === 200, JSON.stringify(r.response), txId]
+        [algumOk, JSON.stringify(resultados), txId]
       );
-      await pool.query(
-        `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
-         VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
-        ['purchase_' + txId, src, funnel.id, r.httpStatus, JSON.stringify(r.payload)]
-      );
-    } else if (paid && !funnel) {
+    } else if (paid && !funnels.length) {
       // pago mas sem funil resolvido: registra o motivo para diagnóstico
       await pool.query(
         `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
@@ -206,6 +225,14 @@ app.post('/webhook/payt', async (req, res) => {
 });
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// registra as rotas de API do dashboard (/api/*)
+const { registerApi } = require('./api');
+registerApi(app, pool);
+
+// serve o dashboard (página estática) em /dashboard
+const path = require('path');
+app.get('/dashboard', (_req, res) => res.sendFile(path.join(__dirname, 'dashboard.html')));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('tracking service on :' + PORT));
