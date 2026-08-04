@@ -33,10 +33,12 @@ app.use(express.urlencoded({ extended: true }));
 // resolve o funil ativo por domínio (host) — usado no /collect
 async function funnelByDomain(host) {
   if (!host) return null;
-  const clean = host.replace(/^www\./, '');
+  // remove prefixos track. e www. para casar com o dominio cadastrado.
+  // Ex: track.seducaodamulher.shop -> seducaodamulher.shop -> www.seducaodamulher.shop
+  const bare = host.replace(/^track\./, '').replace(/^www\./, '');
   const { rows } = await pool.query(
-    `SELECT * FROM funnels WHERE active AND (domain = $1 OR domain = $2) LIMIT 1`,
-    [host, 'www.' + clean]
+    `SELECT * FROM funnels WHERE active AND (domain = $1 OR domain = $2 OR domain = $3) LIMIT 1`,
+    [host, bare, 'www.' + bare]
   );
   return rows[0] || null;
 }
