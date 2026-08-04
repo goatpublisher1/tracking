@@ -113,12 +113,40 @@ app.post('/webhook/payt', async (req, res) => {
   try {
     const p = req.body || {};
 
+    // LOG TEMPORARIO: registra o payload para descobrir onde a PayT poe o sck.
+    // Remover depois de identificar a estrutura.
+    try { console.log('PAYT_WEBHOOK', JSON.stringify(p).slice(0, 2000)); } catch (e) {}
+
     // status de pagamento fica em transaction.payment_status; o de order em status
     const paid = p?.transaction?.payment_status === 'paid' || p?.status === 'paid';
     // sck = identificador único (chave do store-lookup); src = origem/UTMs
-    const sck = p?.link?.sources?.sck || p?.customer?.origin?.query_params?.sck
-              || p?.customer?.origin?.query_params?.click_id || null;
-    const src = p?.link?.sources?.src || null;
+    // A PayT expõe os parametros da URL em locais que variam; procuramos em vários.
+    function digSck(o) {
+      if (!o || typeof o !== 'object') return null;
+      // caminhos conhecidos/prováveis
+      const paths = [
+        o?.link?.sources?.sck,
+        o?.customer?.origin?.query_params?.sck,
+        o?.sources?.sck,
+        o?.url_parameters?.sck,
+        o?.url_params?.sck,
+        o?.tracking?.sck,
+        o?.checkout?.url_parameters?.sck,
+        o?.sck,
+      ];
+      for (const v of paths) if (v) return v;
+      return null;
+    }
+    function digSrc(o) {
+      const paths = [
+        o?.link?.sources?.src, o?.sources?.src, o?.url_parameters?.src,
+        o?.url_params?.src, o?.tracking?.src, o?.src,
+      ];
+      for (const v of paths) if (v) return v;
+      return null;
+    }
+    const sck = digSck(p) || p?.customer?.origin?.query_params?.click_id || null;
+    const src = digSrc(p) || null;
 
     // valida origem pelo integration_key contra o segredo do funil (se houver)
     let funnel = null;
