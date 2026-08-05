@@ -123,23 +123,27 @@ app.post('/webhook/payt', async (req, res) => {
     // A PayT expõe os parametros da URL em locais que variam; procuramos em vários.
     function digSck(o) {
       if (!o || typeof o !== 'object') return null;
-      // caminhos conhecidos/prováveis
+      // todos os caminhos onde a PayT pode por o sck (varia por venda)
       const paths = [
-        o?.link?.sources?.sck,
+        o?.link?.query_params?.sck,          // <- caso mais comum (nosso idx_)
         o?.customer?.origin?.query_params?.sck,
+        o?.link?.sources?.sck,
         o?.sources?.sck,
+        o?.query_params?.sck,
         o?.url_parameters?.sck,
         o?.url_params?.sck,
         o?.tracking?.sck,
         o?.checkout?.url_parameters?.sck,
         o?.sck,
-      ];
-      for (const v of paths) if (v) return v;
-      return null;
+      ].filter(Boolean);
+      // prioriza o nosso sck (idx_), que casa com o store; senao usa o primeiro
+      const nosso = paths.find(v => typeof v === 'string' && v.indexOf('idx_') === 0);
+      return nosso || paths[0] || null;
     }
     function digSrc(o) {
       const paths = [
-        o?.link?.sources?.src, o?.sources?.src, o?.url_parameters?.src,
+        o?.link?.query_params?.src, o?.link?.sources?.src, o?.sources?.src,
+        o?.query_params?.src, o?.url_parameters?.src,
         o?.url_params?.src, o?.tracking?.src, o?.src,
       ];
       for (const v of paths) if (v) return v;
