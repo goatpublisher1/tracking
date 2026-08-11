@@ -218,15 +218,23 @@ app.post('/webhook/payt', async (req, res) => {
     await pool.query(
       `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
          currency, product_code, product_name, customer_email, customer_phone,
-         utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
+         payment_method, paid_at, upsell_from, city, state, country, customer_ip)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
        ON CONFLICT (transaction_id) DO UPDATE SET status=EXCLUDED.status,
-         offer_type=COALESCE(EXCLUDED.offer_type, sales.offer_type)`,
+         offer_type=COALESCE(EXCLUDED.offer_type, sales.offer_type),
+         payment_method=COALESCE(EXCLUDED.payment_method, sales.payment_method),
+         paid_at=COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
       [txId, (sck || 'purchase_' + txId), sck, src, (p?.transaction?.payment_status || p?.status),
        value, total, funnel?.currency || 'BRL',
        p?.product?.code, p?.product?.name, p?.customer?.email, p?.customer?.phone,
        click?.utm_source, click?.utm_campaign, click?.campaign_id,
-       click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType]
+       click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType,
+       (p?.transaction?.payment_method || null),
+       (p?.transaction?.paid_at || null),
+       (p?.transaction?.upsell_from || null),
+       (store?.city || null), (store?.state || null), (store?.country || null),
+       (p?.customer?.ip || store?.ip_override || null)]
     );
 
     // dispara CAPI para CADA pixel ativo do domínio (multi-conta)
