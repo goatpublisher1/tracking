@@ -16,7 +16,7 @@ Save the result as `schema.sql` in the repo root.
 
 ## Step 2: Verify Production Assumptions
 
-Run these queries against production and document the results — they inform Tasks 2, 7, and 8:
+Run these queries against production and document the results — the inline comments reference which tasks depend on each result:
 
 ```sql
 -- (a) transaction_id vem sempre preenchido? (premissa da Task 8)
@@ -60,7 +60,7 @@ sleep 5
 psql "postgresql://postgres:test@localhost:55432/postgres" -f schema.sql
 ```
 
-The test suite `test/sql.test.sh` (created in later tasks) will connect to: `postgresql://postgres:test@localhost:55432/postgres`
+A later task will add `test/sql.test.sh`, which will need a Postgres instance with this schema applied.
 
 ---
 
