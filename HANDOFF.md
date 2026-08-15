@@ -111,3 +111,42 @@ FROM (SELECT DISTINCT ON (sck) sck, funnel_id FROM clicks
       WHERE funnel_id IS NOT NULL ORDER BY sck, created_at DESC) c
 WHERE c.sck = st.sck AND st.funnel_id IS NULL;
 ```
+
+## Task 5: Ligar o enforce de autenticação (rodar só depois do deploy)
+
+`server.js` agora tem o gate de autenticação do `/webhook/payt` (ver commit da Task 5), mas ele nasce **desligado**: só bloqueia quando `PAYT_AUTH_ENFORCE=1` estiver definido no ambiente. Enquanto isso, ele continua só logando `PAYT_AUTH_NEGADO` em caso de falha, sem retornar 401. Os passos abaixo são do repo owner, com acesso ao Coolify e ao painel da PayT — não foram (e não podem ser) executados neste ambiente de desenvolvimento local.
+
+**Risco: ALTO, mitigado.** Este é o único ponto do plano onde um erro de configuração para de gravar vendas. Siga a ordem exata abaixo.
+
+### 1. Critério de liberação (antes de tocar em qualquer env var)
+
+Nos logs de produção (Coolify), das últimas 48h: todo `PAYT_AUTH`/`PAYT_AUTH_NEGADO` tem comportamento esperado? Existe algum registro de falha de token com `tx` de venda real (não `null`)? Se sim, **pare** e investigue a origem antes de continuar — não ligue o enforce.
+
+### 2. Deploy com o enforce desligado
+
+Suba o código desta task com `PAYT_AUTH_ENFORCE` **ausente ou `0`**. O gate está no ar mas continua só logando. Confirme que as vendas continuam entrando normalmente antes de ir para o próximo passo.
+
+### 3. Ligar o enforce
+
+No Coolify, defina `PAYT_AUTH_ENFORCE=1` e reinicie a aplicação (só restart, sem rebuild — o kill switch é a mesma variável, de volta para `0` ou ausente).
+
+### 4. Validar imediatamente com uma venda real
+
+Faça uma compra de teste real na PayT (valor mínimo) e confirme, em até 5 minutos:
+
+```sql
+SELECT transaction_id, status, value, funnel_id, capi_sent FROM sales ORDER BY created_at DESC LIMIT 3;
+```
+
+Esperado: a venda de teste aparece com `capi_sent = true`.
+
+### 5. Rollback
+
+Se a venda **não** aparecer dentro de 5 minutos, desligue o enforce agora (`PAYT_AUTH_ENFORCE=0` + restart) e volte para o modo shadow — sinal de que a URL configurada na PayT não está mandando o token correto.
+
+### 6. Monitorar por 24h
+
+Procure `PAYT_AUTH_NEGADO` nos logs.
+
+- `tx: null` com IPs desconhecidos: varredura da internet — exatamente o que o gate existe para barrar. Não requer ação.
+- `tx` preenchido: uma venda real está sendo rejeitada. Desligue o enforce (`PAYT_AUTH_ENFORCE=0` + restart) e investigue antes de religar.

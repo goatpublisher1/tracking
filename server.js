@@ -128,16 +128,17 @@ app.post('/webhook/payt', async (req, res) => {
   try {
     const p = req.body || {};
 
-    // SHADOW: ainda não bloqueia. Só registra se o token bateria.
-    // O enforce é ligado na Task 5, via PAYT_AUTH_ENFORCE=1.
+    // Gate de autenticação. A politica de "sempre 200" cobre ERRO INTERNO;
+    // requisicao nao autenticada nao e a PayT e recebe 401.
+    // Desligavel em segundos pelo Coolify: PAYT_AUTH_ENFORCE=0, sem rebuild.
     const tokenRecebido = req.get('x-payt-token') || req.query.t || '';
     const tokenOk = tokenValido(tokenRecebido, process.env.PAYT_WEBHOOK_TOKEN);
-    console.log('PAYT_AUTH', JSON.stringify({
-      ok: tokenOk,
-      presente: !!tokenRecebido,
-      ip: req.ip,
-      tx: p?.transaction_id || null,
-    }));
+    if (!tokenOk) {
+      console.warn('PAYT_AUTH_NEGADO', JSON.stringify({
+        ip: req.ip, presente: !!tokenRecebido, tx: p?.transaction_id || null,
+      }));
+      if (process.env.PAYT_AUTH_ENFORCE === '1') return res.sendStatus(401);
+    }
 
     // LOG TEMPORARIO: registra o payload para descobrir onde a PayT poe o sck.
     // Remover depois de identificar a estrutura.
