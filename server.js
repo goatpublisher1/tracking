@@ -75,6 +75,7 @@ app.post('/collect', async (req, res) => {
 
     const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
     const funnel = await funnelByDomain(host);
+    if (!funnel) console.warn('FUNIL_NAO_RESOLVIDO', JSON.stringify({ host, sck: b.sck || null }));
     if (!b.sck) {
       console.log('collect sem sck. body recebido:', JSON.stringify(req.body).slice(0, 200));
       return res.status(400).json({ error: 'missing sck' });
@@ -89,7 +90,11 @@ app.post('/collect', async (req, res) => {
          src=EXCLUDED.src, fbp=EXCLUDED.fbp, fbc=EXCLUDED.fbc,
          ip_override=EXCLUDED.ip_override, user_agent=EXCLUDED.user_agent,
          page_location=EXCLUDED.page_location, external_id=EXCLUDED.external_id,
-         city=EXCLUDED.city, state=EXCLUDED.state, country=EXCLUDED.country`,
+         city=EXCLUDED.city, state=EXCLUDED.state, country=EXCLUDED.country,
+         -- funnel_id era a UNICA coluna omitida aqui. Uma linha nascida com
+         -- funil NULL nunca se recuperava, e a atribuicao caia no fallback por
+         -- product_code — que manda a venda para o pixel do dominio errado.
+         funnel_id=COALESCE(store.funnel_id, EXCLUDED.funnel_id)`,
       [b.sck, b.src, b.fbp, b.fbc, req.ip || b.ip, b.user_agent || req.headers['user-agent'],
        b.page_location, b.external_id, b.city, b.state, b.country,
        funnel ? funnel.id : null]

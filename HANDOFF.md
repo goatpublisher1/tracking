@@ -88,3 +88,26 @@ Cada linha aqui é receita que o painel está reportando como zero. O `value` co
 UPDATE sales s SET funnel_id = st.funnel_id
 FROM store st WHERE st.sck = s.sck AND s.funnel_id IS NULL AND st.funnel_id IS NOT NULL;
 ```
+
+## Task 4: Recuperar `funnel_id` em linhas antigas de `store` (rodar só depois do deploy)
+
+`server.js` agora tem `funnel_id` no `ON CONFLICT` da tabela `store` (ver commit da Task 4), mas linhas que nasceram com `funnel_id = NULL` porque o domínio era desconhecido no primeiro `/collect` permanecem NULL. A query abaixo recupera esses valores onde há um clique com funil atribuído na mesma `sck`.
+
+**Risco: baixo.** Só preenche NULLs; não toca em valores já presentes.
+
+Primeiro execute como `SELECT` para ver quantas linhas seriam afetadas:
+
+```sql
+SELECT COUNT(*) FROM store st
+WHERE st.funnel_id IS NULL
+AND EXISTS (SELECT 1 FROM clicks c WHERE c.sck = st.sck AND c.funnel_id IS NOT NULL);
+```
+
+Depois execute o `UPDATE`:
+
+```sql
+UPDATE store st SET funnel_id = c.funnel_id
+FROM (SELECT DISTINCT ON (sck) sck, funnel_id FROM clicks
+      WHERE funnel_id IS NOT NULL ORDER BY sck, created_at DESC) c
+WHERE c.sck = st.sck AND st.funnel_id IS NULL;
+```
