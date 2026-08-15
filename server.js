@@ -242,10 +242,30 @@ app.post('/webhook/payt', async (req, res) => {
          utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
          payment_method, paid_at, upsell_from, city, state, country, customer_ip)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
-       ON CONFLICT (transaction_id) DO UPDATE SET status=EXCLUDED.status,
-         offer_type=COALESCE(EXCLUDED.offer_type, sales.offer_type),
-         payment_method=COALESCE(EXCLUDED.payment_method, sales.payment_method),
-         paid_at=COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
+       ON CONFLICT (transaction_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
+         value = GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0)),
+         total_price = GREATEST(COALESCE(EXCLUDED.total_price,0), COALESCE(sales.total_price,0)),
+         -- atribuicao: o PRIMEIRO valor nao-nulo vence (o clique original e a verdade)
+         sck = COALESCE(sales.sck, EXCLUDED.sck),
+         src = COALESCE(sales.src, EXCLUDED.src),
+         funnel_id = COALESCE(sales.funnel_id, EXCLUDED.funnel_id),
+         utm_source = COALESCE(sales.utm_source, EXCLUDED.utm_source),
+         utm_campaign = COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign),
+         campaign_id = COALESCE(sales.campaign_id, EXCLUDED.campaign_id),
+         adset_id = COALESCE(sales.adset_id, EXCLUDED.adset_id),
+         ad_id = COALESCE(sales.ad_id, EXCLUDED.ad_id),
+         city = COALESCE(sales.city, EXCLUDED.city),
+         state = COALESCE(sales.state, EXCLUDED.state),
+         country = COALESCE(sales.country, EXCLUDED.country),
+         customer_ip = COALESCE(sales.customer_ip, EXCLUDED.customer_ip),
+         -- estado da transacao: o MAIS RECENTE nao-nulo vence
+         customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
+         customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
+         offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
+         payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
+         paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
       [txId, (sck || 'purchase_' + txId), sck, src, (p?.transaction?.payment_status || p?.status),
        value, total, funnel?.currency || 'BRL',
        p?.product?.code, p?.product?.name, p?.customer?.email, p?.customer?.phone,

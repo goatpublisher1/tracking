@@ -65,3 +65,26 @@ A later task will add `test/sql.test.sh`, which will need a Postgres instance wi
 ---
 
 **This handoff must be completed by the repo owner before Tasks 2–8 can run their full test suites.**
+
+---
+
+## Task 3: Corrigir vendas já corrompidas (rodar só depois do deploy)
+
+`server.js` agora tem um `ON CONFLICT` completo em `sales` (ver commit da Task 3), mas isso não conserta as linhas que já foram gravadas com `value = 0` e sem atribuição antes da correção. Estas queries devem ser rodadas manualmente em produção, na ordem abaixo — **o `SELECT` precisa ser inspecionado antes de rodar qualquer `UPDATE`**.
+
+Identifica vendas pagas com `value=0` que têm um clique atribuível:
+
+```sql
+-- primeiro INSPECIONE, não atualize às cegas
+SELECT s.transaction_id, s.value, s.sck, s.funnel_id, s.created_at
+FROM sales s
+WHERE s.status='paid' AND (s.value IS NULL OR s.value = 0)
+ORDER BY s.created_at DESC;
+```
+
+Cada linha aqui é receita que o painel está reportando como zero. O `value` correto só existe no payload original da PayT — não é recuperável do banco. Se precisar do histórico correto, exporte o relatório de comissões da PayT e reconcilie por `transaction_id`. Recuperar o `funnel_id` e o `sck` é possível pelo `store`:
+
+```sql
+UPDATE sales s SET funnel_id = st.funnel_id
+FROM store st WHERE st.sck = s.sck AND s.funnel_id IS NULL AND st.funnel_id IS NOT NULL;
+```
