@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Tracking server-side (CAPI) self-hosted - substitui GTM+Stape",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": { "start": "node server.js", "test": "node --test test/**/*.js" },
   "dependencies": {
     "express": "^4.19.2",
     "pg": "^8.11.5"
