@@ -13,7 +13,16 @@ const { sendPurchase } = require('./capi');
 const { tokenValido } = require('./auth');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+// Um client ocioso que recebe erro do backend (restart do Postgres, failover,
+// redeploy do banco) faz o Pool emitir 'error'. EventEmitter sem listener em
+// 'error' LANÇA e mata o processo — e isso acontece fora de qualquer try/catch.
+pool.on('error', (err) => console.error('PG_POOL_ERROR', err));
+process.on('unhandledRejection', (err) => console.error('UNHANDLED_REJECTION', err));
 const app = express();
+// Atrás do Traefik/Coolify. Sem isto, req.ip devolve o IP da rede interna do
+// Docker (172.x), que vai parar em client_ip_address na CAPI e derruba o match.
+// 1 = confia apenas no proxy imediato (não em X-Forwarded-For arbitrário).
+app.set('trust proxy', 1);
 
 // CORS: autoriza requisições do /collect vindas de qualquer origem.
 // O /collect só grava dados de tracking (não expõe leitura), então liberar
@@ -81,7 +90,7 @@ app.post('/collect', async (req, res) => {
          ip_override=EXCLUDED.ip_override, user_agent=EXCLUDED.user_agent,
          page_location=EXCLUDED.page_location, external_id=EXCLUDED.external_id,
          city=EXCLUDED.city, state=EXCLUDED.state, country=EXCLUDED.country`,
-      [b.sck, b.src, b.fbp, b.fbc, b.ip || req.ip, b.user_agent || req.headers['user-agent'],
+      [b.sck, b.src, b.fbp, b.fbc, req.ip || b.ip, b.user_agent || req.headers['user-agent'],
        b.page_location, b.external_id, b.city, b.state, b.country,
        funnel ? funnel.id : null]
     );
@@ -93,7 +102,7 @@ app.post('/collect', async (req, res) => {
          utm_source, utm_medium, utm_campaign, utm_content, utm_term,
          campaign_id, adset_id, ad_id, placement, funnel_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-      [b.sck, b.src, b.fbp, b.fbc, b.fbclid, b.ip || req.ip,
+      [b.sck, b.src, b.fbp, b.fbc, b.fbclid, req.ip || b.ip,
        b.user_agent || req.headers['user-agent'], b.page_location,
        u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content, u.utm_term,
        u.campaign_id, u.adset_id, u.ad_id, u.placement, funnel ? funnel.id : null]

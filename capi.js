@@ -79,6 +79,9 @@ async function sendPurchase({ funnel, sale, store }) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    // undici não tem timeout de request por padrão (só headersTimeout ~5min).
+    // O loop de pixels em server.js é sequencial, então o pior caso soma.
+    signal: AbortSignal.timeout(8000),
   });
   const json = await res.json().catch(() => ({}));
   return { httpStatus: res.status, response: json, payload: event };
