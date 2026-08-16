@@ -314,6 +314,12 @@ app.post('/webhook/payt', async (req, res) => {
       }
       // capi_sent = true se PELO MENOS um pixel aceitou
       const algumOk = resultados.some(r => r.status === 200);
+      if (!algumOk) {
+        // prefixo fixo para alerta por match de string no Coolify/Discord
+        console.error('CAPI_FALHOU', JSON.stringify({
+          tx: txId, funil: funnel?.slug || null, resultados,
+        }));
+      }
       await pool.query(
         `UPDATE sales SET capi_sent=$1, capi_response=$2 WHERE transaction_id=$3`,
         [algumOk, JSON.stringify(resultados), txId]

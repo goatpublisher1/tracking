@@ -157,3 +157,41 @@ Procure `PAYT_AUTH_NEGADO` nos logs.
 
 - `tx: null` com IPs desconhecidos: varredura da internet — exatamente o que o gate existe para barrar. Não requer ação.
 - `tx` preenchido: uma venda real está sendo rejeitada. Desligue o enforce (`PAYT_AUTH_ENFORCE=0` + restart) e investigue antes de religar.
+
+## Task 7: Alerta CAPI_FALHOU e reprocessamento (rodar só depois do deploy)
+
+`server.js` agora loga `CAPI_FALHOU` (prefixo fixo, greppável) quando nenhum pixel aceitou o Purchase de uma venda paga. `scripts/reprocessa-capi.js` reenvia vendas pagas com `capi_sent IS NOT TRUE` chamando `sendPurchase` de `capi.js` — o mesmo caminho usado pelo webhook, então herda o `event_id = 'purchase_' + transaction_id` da Task 6.
+
+**Risco: MÉDIO se rodado antes da Task 6 estar no ar.** Sem o `event_id` por transação (commit `5d3c837`), o reenvio pode gerar evento duplicado na Meta em vez de deduplicar. Confirme que esse commit está em produção antes de rodar o script pela primeira vez.
+
+### 1. Rodar em dry-run contra produção
+
+```bash
+DATABASE_URL="<url de producao>" node scripts/reprocessa-capi.js --dry
+```
+
+Esperado: uma linha `N venda(s) para reprocessar (dry-run)` seguida de uma linha `enviaria <transaction_id> para [<pixel_id>, ...]` por venda. Compare a contagem com a query (g) da Task 0 (seção "Backlog", abaixo). Não gera nenhuma chamada de rede nem grava nada no banco.
+
+### 2. Rodar de verdade
+
+Só depois de confirmar o dry-run e o deploy da Task 6:
+
+```bash
+DATABASE_URL="<url de producao>" node scripts/reprocessa-capi.js
+```
+
+Cada venda reenviada grava `capi_sent`/`capi_response` em `sales` (mesmo formato que o webhook grava) e imprime `<transaction_id> OK ...` ou `<transaction_id> FALHOU ...`. Confirme no Gerenciador de Eventos da Meta que os eventos apareceram.
+
+Janela: o script só pega vendas com `created_at` nos últimos 6 dias — a Meta rejeita eventos com mais de 7 dias, a margem de 1 dia é para o tempo de execução/agendamento.
+
+### 3. Alerta no Coolify
+
+Configure notificação por match de string nos logs do serviço para `CAPI_FALHOU` (prefixo fixo em `server.js`, sempre no início da linha). Se o Coolify não tiver esse recurso, agende `node scripts/reprocessa-capi.js --dry` 1x/dia (cron) e revise a saída manualmente.
+
+### 4. Query de backlog (para conferência manual a qualquer momento)
+
+```sql
+SELECT count(*) FROM sales WHERE status='paid' AND capi_sent IS NOT TRUE;
+```
+
+Mesma query (g) do Step 2 desta handoff — deve tender a zero conforme o reprocessamento roda periodicamente.
