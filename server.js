@@ -272,7 +272,7 @@ app.post('/webhook/payt', async (req, res) => {
          offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
          payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
          paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
-      [txId, (sck || 'purchase_' + txId), sck, src, (p?.transaction?.payment_status || p?.status),
+      [txId, 'purchase_' + txId, sck, src, (p?.transaction?.payment_status || p?.status),
        value, total, funnel?.currency || 'BRL',
        p?.product?.code, p?.product?.name, p?.customer?.email, p?.customer?.phone,
        click?.utm_source, click?.utm_campaign, click?.campaign_id,
@@ -306,7 +306,7 @@ app.post('/webhook/payt', async (req, res) => {
           await pool.query(
             `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
              VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
-            [(sck || 'purchase_' + txId), src, f.id, r.httpStatus, JSON.stringify(r.payload)]
+            ['purchase_' + txId, src, f.id, r.httpStatus, JSON.stringify(r.payload)]
           );
         } catch (err) {
           resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });

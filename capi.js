@@ -32,12 +32,10 @@ function splitName(full) {
   };
 }
 
-// monta e envia o evento Purchase para a CAPI
-async function sendPurchase({ funnel, sale, store }) {
+// monta o evento Purchase (puro, sem rede — exportado para teste)
+function buildPurchaseEvent({ funnel, sale, store }) {
   const { fn, ln } = splitName(sale.customer_name);
 
-  // user_data — os mesmos 12 campos do container (em, ph, fn, ln, ct, st,
-  // country, client_user_agent, client_ip_address, fbc, fbp, external_id)
   const user_data = clean({
     em: hash(sale.customer_email),
     ph: hashPhone(sale.customer_phone),
@@ -60,17 +58,25 @@ async function sendPurchase({ funnel, sale, store }) {
     order_id: sale.transaction_id,
   });
 
-  const event = clean({
+  return clean({
     event_name: 'Purchase',
     event_time: Math.floor(Date.now() / 1000),
-    // event_id = sck (o mesmo id único gerado no clique). Mantém consistência
-    // com o InitiateCheckout e deduplica reenvios do webhook.
-    event_id: store?.sck || ('purchase_' + sale.transaction_id),
+    // event_id derivado da TRANSACAO, nao do sck. O sck identifica a sessao:
+    // uma compra + um upsell na mesma sessao geravam o mesmo event_id e a Meta
+    // descartava o segundo. A dedupe da Meta so opera entre eventos de mesmo
+    // event_name, entao compartilhar o id com o InitiateCheckout nao trazia
+    // beneficio nenhum. Reenvio do mesmo webhook continua deduplicado.
+    event_id: 'purchase_' + sale.transaction_id,
     action_source: 'website',
     event_source_url: store?.page_location || undefined,
     user_data,
     custom_data,
   });
+}
+
+// monta e envia o evento Purchase para a CAPI
+async function sendPurchase({ funnel, sale, store }) {
+  const event = buildPurchaseEvent({ funnel, sale, store });
 
   const url = `${GRAPH}/${funnel.pixel_id}/events?access_token=${funnel.capi_token}`;
   const body = { data: [event] };
@@ -96,4 +102,4 @@ function clean(obj) {
   return out;
 }
 
-module.exports = { sendPurchase, hash, hashPhone };
+module.exports = { sendPurchase, buildPurchaseEvent, hash, hashPhone };
