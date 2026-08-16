@@ -118,13 +118,20 @@ WHERE c.sck = st.sck AND st.funnel_id IS NULL;
 
 **Risco: ALTO, mitigado.** Este é o único ponto do plano onde um erro de configuração para de gravar vendas. Siga a ordem exata abaixo.
 
-### 1. Critério de liberação (antes de tocar em qualquer env var)
+### 1. Deploy com o enforce desligado
 
-Nos logs de produção (Coolify), das últimas 48h: todo `PAYT_AUTH`/`PAYT_AUTH_NEGADO` tem comportamento esperado? Existe algum registro de falha de token com `tx` de venda real (não `null`)? Se sim, **pare** e investigue a origem antes de continuar — não ligue o enforce.
+Esta branch é implantada de uma vez só — o log incondicional `PAYT_AUTH` da Task 1 não existe mais no código; foi substituído pelo bloco de gate desta task, que só loga `PAYT_AUTH_NEGADO`, e só em caso de falha. **A instrução da Task 1 de observar `PAYT_AUTH` com `ok:true` por 48h está superada: esse log não existe mais assim que este código sobe.** Use o critério da seção 2 abaixo.
 
-### 2. Deploy com o enforce desligado
+Suba o código desta task com `PAYT_AUTH_ENFORCE` **ausente ou `0`**. O gate está no ar mas continua só logando — com o enforce desligado, toda requisição cujo token não bate ainda passa, só que agora emitindo `PAYT_AUTH_NEGADO`. Confirme que as vendas continuam entrando normalmente antes de ir para o próximo passo.
 
-Suba o código desta task com `PAYT_AUTH_ENFORCE` **ausente ou `0`**. O gate está no ar mas continua só logando. Confirme que as vendas continuam entrando normalmente antes de ir para o próximo passo.
+### 2. Critério de liberação (antes de ligar o enforce)
+
+Com o gate no ar e o enforce desligado, observe os logs de produção (Coolify) por pelo menos 48h cobrindo um volume real de vendas. Procure `PAYT_AUTH_NEGADO`:
+
+- `tx: null` com IPs desconhecidos é varredura da internet — esperado, não bloqueia a liberação.
+- `tx` preenchido significa uma venda real chegando sem token válido — exatamente a falha de configuração que o enforce, uma vez ligado, transformaria em vendas perdidas.
+
+**Critério para ligar o enforce:** zero entradas `PAYT_AUTH_NEGADO` com `tx` preenchido no período observado. Se aparecer alguma, **pare** e investigue a origem antes de continuar — não ligue o enforce.
 
 ### 3. Ligar o enforce
 
