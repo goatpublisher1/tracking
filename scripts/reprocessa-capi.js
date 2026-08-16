@@ -11,12 +11,20 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const dry = process.argv.includes('--dry');
 
 async function main() {
-  // 6 dias: a Meta rejeita eventos com mais de 7 dias
+  // 6 dias: a Meta rejeita eventos com mais de 7 dias.
+  // Exclui vendas de produto com send_to_meta=false (upsell/backend) — mesma
+  // regra do webhook em server.js (produto nao cadastrado = envia por padrao).
   const { rows: vendas } = await pool.query(`
-    SELECT * FROM sales
-    WHERE status='paid' AND capi_sent IS NOT TRUE AND funnel_id IS NOT NULL
-      AND created_at > now() - interval '6 days'
-    ORDER BY created_at`);
+    SELECT s.* FROM sales s
+    WHERE s.status='paid' AND s.capi_sent IS NOT TRUE AND s.funnel_id IS NOT NULL
+      AND s.created_at > now() - interval '6 days'
+      AND NOT EXISTS (
+        SELECT 1 FROM products pr
+        JOIN funnels f ON f.slug = pr.funnel_slug
+        WHERE pr.product_code = s.product_code AND pr.active AND f.active
+          AND pr.send_to_meta = false
+      )
+    ORDER BY s.created_at`);
 
   console.log(`${vendas.length} venda(s) para reprocessar${dry ? ' (dry-run)' : ''}`);
 

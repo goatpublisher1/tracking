@@ -160,7 +160,7 @@ Procure `PAYT_AUTH_NEGADO` nos logs.
 
 ## Task 7: Alerta CAPI_FALHOU e reprocessamento (rodar só depois do deploy)
 
-`server.js` agora loga `CAPI_FALHOU` (prefixo fixo, greppável) quando nenhum pixel aceitou o Purchase de uma venda paga. `scripts/reprocessa-capi.js` reenvia vendas pagas com `capi_sent IS NOT TRUE` chamando `sendPurchase` de `capi.js` — o mesmo caminho usado pelo webhook, então herda o `event_id = 'purchase_' + transaction_id` da Task 6.
+`server.js` agora loga `CAPI_FALHOU` (prefixo fixo, greppável) quando nenhum pixel aceitou o Purchase de uma venda paga. `scripts/reprocessa-capi.js` reenvia vendas pagas com `capi_sent IS NOT TRUE` chamando `sendPurchase` de `capi.js` — o mesmo caminho usado pelo webhook, então herda o `event_id = 'purchase_' + transaction_id` da Task 6. O script respeita a mesma regra de `send_to_meta` do webhook: produto cadastrado com `send_to_meta=false` (upsell/backend) nunca é reenviado, mesmo estando com `capi_sent IS NOT TRUE`.
 
 **Risco: MÉDIO se rodado antes da Task 6 estar no ar.** Sem o `event_id` por transação (commit `5d3c837`), o reenvio pode gerar evento duplicado na Meta em vez de deduplicar. Confirme que esse commit está em produção antes de rodar o script pela primeira vez.
 
@@ -190,8 +190,24 @@ Configure notificação por match de string nos logs do serviço para `CAPI_FALH
 
 ### 4. Query de backlog (para conferência manual a qualquer momento)
 
+Contagem bruta (mesma query (g) do Step 2 desta handoff — inclui vendas de produto `send_to_meta=false`, que o script NUNCA reenvia de propósito):
+
 ```sql
 SELECT count(*) FROM sales WHERE status='paid' AND capi_sent IS NOT TRUE;
+```
+
+Contagem exata do que o script vai processar (bate com o dry-run — exclui produto com `send_to_meta=false`, mesma regra do webhook em `server.js`):
+
+```sql
+SELECT count(*) FROM sales s
+WHERE s.status='paid' AND s.capi_sent IS NOT TRUE AND s.funnel_id IS NOT NULL
+  AND s.created_at > now() - interval '6 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM products pr
+    JOIN funnels f ON f.slug = pr.funnel_slug
+    WHERE pr.product_code = s.product_code AND pr.active AND f.active
+      AND pr.send_to_meta = false
+  );
 ```
 
 Mesma query (g) do Step 2 desta handoff — deve tender a zero conforme o reprocessamento roda periodicamente.
