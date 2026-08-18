@@ -211,3 +211,37 @@ WHERE s.status='paid' AND s.capi_sent IS NOT TRUE AND s.funnel_id IS NOT NULL
 ```
 
 Mesma query (g) do Step 2 desta handoff — deve tender a zero conforme o reprocessamento roda periodicamente.
+
+## Task 8: Guards contra falha silenciosa (I7 + I8 + M4)
+
+`server.js` agora loga três casos que antes falhavam calados: `transaction_id` ausente (`PAYT_SEM_TXID`, com early return e `{ok:false, motivo:'sem_transaction_id'}` — a venda não é gravável de jeito nenhum sem chave, hoje vira lixo no banco), comissão zerada num pagamento `paid` (`VENDA_SEM_COMISSAO`, só loga, não bloqueia o envio à Meta) e status de pagamento fora do vocabulário conhecido (`PAYT_STATUS_DESCONHECIDO`, só loga). Nenhum dos três muda o comportamento de envio hoje — todos foram implementados como "loga primeiro".
+
+**Risco: baixo.** O único `return` novo é para payloads que hoje já produzem lixo no banco (linha coberta pelo teste local abaixo).
+
+### 1. Reconciliar `CONHECIDOS`
+
+A lista `CONHECIDOS` em `server.js` (paid, waiting_payment, pending, refused, canceled, refunded, chargeback, expired) foi copiada da brief sem confirmar contra o banco real, porque este ambiente de desenvolvimento não tem acesso a produção. Rode e ajuste a lista com os valores reais antes de considerar o alerta silencioso confiável:
+
+```sql
+SELECT status, count(*) FROM sales GROUP BY 1 ORDER BY 2 DESC;
+```
+
+Um status desconhecido só gera `console.warn`, nunca muda o `paid` calculado nem o que é gravado — ajustar a lista depois é seguro, sem deploy urgente.
+
+### 2. Teste local: DB indisponível impediu validar a resposta exata dos guards via curl
+
+Os dois curls do Step 4 da brief foram rodados de verdade, mas **nenhum dos dois chegou aos guards novos**: a resolução de funil (fallback por `product.code` e o fallback 3 incondicional — `SELECT * FROM funnels WHERE active`, código de tasks anteriores, não tocado aqui) roda *antes* do guard de `txId` e sempre faz pelo menos um `SELECT`. Sem Postgres neste ambiente, ambos os requests morreram em `ECONNREFUSED` capturado pelo catch externo (`{"ok":false}` genérico, HTTP 200), antes de alcançar `PAYT_SEM_TXID` ou `VENDA_SEM_COMISSAO`. Ver `task-8-report.md` para os logs completos. A lógica dos três guards foi verificada isoladamente (script à parte, não commitado) reproduzindo as mesmas expressões usadas em `server.js` para os mesmos payloads — todos os casos bateram, incluindo o caso de divergência do `paid` (`transaction.payment_status` preenchido com valor diferente de `'paid'` e `status === 'paid'`). Rode os dois curls do Step 4 de novo assim que houver um Postgres acessível, para confirmar a resposta exata em runtime.
+
+### 3. Opções para quando decidir remover o log de PII (Step 6 da brief, não feito nesta task)
+
+`console.log('PAYT_WEBHOOK', ...)` (linha ~145) continua propositalmente ligado — não foi tocado. Quando decidir remover, a versão redigida sugerida na brief:
+
+```js
+console.log('PAYT', p?.transaction_id, sck, statusBruto, value);
+```
+
+`event_log.payload` grava `client_ip_address` e `client_user_agent` em claro. Retenção sugerida (não rodada — decisão do owner):
+
+```sql
+DELETE FROM event_log WHERE created_at < now() - interval '90 days';
+```

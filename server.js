@@ -146,6 +146,16 @@ app.post('/webhook/payt', async (req, res) => {
 
     // status de pagamento fica em transaction.payment_status; o de order em status
     const paid = p?.transaction?.payment_status === 'paid' || p?.status === 'paid';
+    // valor bruto usado so para log/diagnostico (nao alimenta `paid` acima,
+    // que preserva o OR original: || aqui trocaria a semantica em casos onde
+    // transaction.payment_status vem preenchido mas != 'paid' e status == 'paid').
+    const statusBruto = p?.transaction?.payment_status || p?.status || null;
+    // se a PayT mudar o vocabulario de status, hoje as conversoes parariam de
+    // ser enviadas sem nenhum sinal. Este log e o sinal.
+    const CONHECIDOS = ['paid','waiting_payment','pending','refused','canceled','refunded','chargeback','expired'];
+    if (statusBruto && !CONHECIDOS.includes(statusBruto)) {
+      console.warn('PAYT_STATUS_DESCONHECIDO', statusBruto, p?.transaction_id);
+    }
     // sck = identificador único (chave do store-lookup); src = origem/UTMs
     // A PayT expõe os parametros da URL em locais que variam; procuramos em vários.
     function digSck(o) {
@@ -225,8 +235,23 @@ app.post('/webhook/payt', async (req, res) => {
     const producerComm = Array.isArray(p?.commission)
       ? p.commission.find(c => c?.type === 'producer') : null;
     const value = Number(producerComm?.amount ?? p?.commission?.[0]?.amount ?? 0) / 100;
+    // commission nao-array faz o .find e o fallback [0] falharem -> value 0.
+    // Purchase com value 0 conta como conversao e puxa o ROAS aprendido pra baixo.
+    if (paid && !(value > 0)) {
+      console.error('VENDA_SEM_COMISSAO', JSON.stringify({
+        tx: p?.transaction_id, commission: p?.commission,
+      }));
+    }
     const total = Number(p?.transaction?.total_price ?? 0) / 100; // centavos -> reais
-    const txId = p?.transaction_id;
+    // A PayT varia a estrutura do payload (ver digSck). O transaction_id era
+    // lido de um caminho unico. Se vier undefined: UNIQUE aceita multiplos
+    // NULLs, entao o ON CONFLICT nunca dispara (venda duplicada por reenvio) e
+    // o UPDATE de capi_sent casa zero linhas.
+    const txId = p?.transaction_id ?? p?.transaction?.id ?? p?.id ?? null;
+    if (!txId) {
+      console.error('PAYT_SEM_TXID', JSON.stringify(p).slice(0, 500));
+      return res.json({ ok: false, motivo: 'sem_transaction_id' });
+    }
 
     // recupera dados do browser gravados no checkout
     let store = null;
