@@ -296,7 +296,7 @@ DELETE FROM event_log WHERE created_at < now() - interval '90 days';
 
 ## Task 10: CORS por allowlist, token da Meta fora da URL, rate limit (I6 + M2 + M7)
 
-`server.js` agora carrega uma allowlist de origens a partir de `funnels.domain` (recarregada a cada 5 min, `.unref()` para não segurar o processo vivo) e aplica CORS **só na rota `/collect`** — o webhook e o `/health` não são chamados por browser. `Access-Control-Allow-Credentials` foi removido incondicionalmente: nenhum endpoint usa cookie ou sessão, e a combinação antiga (origin refletido + credentials) neutralizava a same-origin policy para qualquer endpoint de leitura que este serviço venha a ganhar. `capi.js` agora manda `access_token` no corpo do POST em vez da query string (a URL some de qualquer log/trace que a imprima).
+`server.js` agora carrega uma allowlist de origens a partir de `funnels.domain` (recarregada a cada 5 min, `.unref()` para não segurar o processo vivo) e aplica CORS **só na rota `/collect`** — o webhook e o `/health` não são chamados por browser. `Access-Control-Allow-Credentials: true` viaja junto com `Access-Control-Allow-Origin` no mesmo condicional: foi restaurado porque removê-lo era a única mudança visível ao browser não controlada pelo kill switch. Se a página de checkout chama `/collect` com `credentials: 'include'` e content-type JSON, o browser exige um preflight; sem o header `Access-Control-Allow-Credentials`, o preflight é rejeitado silenciosamente e o POST nunca sai — uma perda que não gera log no servidor e que o kill switch não poderia desfazer. `capi.js` agora manda `access_token` no corpo do POST em vez da query string (a URL some de qualquer log/trace que a imprima).
 
 **A brief original pedia log-e-espera-48h antes de restringir (Step 1), assumindo deploy tarefa-por-tarefa. Esta branch sobe tudo de uma vez, então esse intervalo não existe.** Em vez disso, o CORS usa o mesmo esquema de kill switch da Task 5 (`PAYT_AUTH_ENFORCE`):
 
@@ -308,7 +308,7 @@ DELETE FROM event_log WHERE created_at < now() - interval '90 days';
 
 ### 1. Deploy com o enforce desligado
 
-Suba esta branch com `CORS_ALLOWLIST_ENFORCE` **ausente**. O comportamento de resposta ao browser não muda (origem continua refletida); `Access-Control-Allow-Credentials` já sai removido neste primeiro deploy — isso é seguro incondicionalmente, não depende do enforce.
+Suba esta branch com `CORS_ALLOWLIST_ENFORCE` **ausente**. O comportamento de resposta ao browser sem `CORS_ALLOWLIST_ENFORCE` não muda (origem continua refletida junto com `Access-Control-Allow-Credentials: true`). Com `CORS_ALLOWLIST_ENFORCE=1`, apenas origens allowlisted recebem ambos os headers — estritamente mais seguro que o código antigo, que refletia qualquer origem com credentials.
 
 ### 2. Critério de liberação (antes de ligar o enforce)
 
@@ -392,4 +392,4 @@ Achados menores da revisão final, deferidos de propósito. `.superpowers/` (ond
 - `sales` não tem `customer_name` — eventos reprocessados chegam à Meta sem `fn`/`ln`, com qualidade de correspondência pior que a de um evento normal do webhook.
 - `VENDA_SEM_COMISSAO` loga `p.commission` cru — revise antes de configurar retenção de log longa (o log `PAYT_WEBHOOK` grava o payload inteiro de qualquer forma, e é o problema de PII maior dos dois).
 - O script de reprocessamento não grava em `event_log` — reenvios não têm a paridade de auditoria que o webhook tem.
-- `normPais` só reconhece `br`/`brasil`/`brazil`; `normTelefone` prefixa `55` em qualquer número de 10–11 dígitos. Adequado para uma operação só-Brasil; os dois descartam ou forçam em vez de mandar um hash que nunca vai casar.
+- `normPais` reconhece `br`/`brasil`/`brazil` e passa através de qualquer código de 2 letras (ISO alpha-2); `normTelefone` prefixa `55` em qualquer número de 10–11 dígitos. Adequado para uma operação só-Brasil; os dois descartam ou forçam em vez de mandar um hash que nunca vai casar.
