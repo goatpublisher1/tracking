@@ -44,6 +44,7 @@ async function main() {
       product_name: v.product_name,
       customer_email: v.customer_email,
       customer_phone: v.customer_phone,
+      event_time: v.paid_at ? Math.floor(new Date(v.paid_at).getTime() / 1000) : undefined,
     };
 
     if (dry) { console.log('enviaria', v.transaction_id, 'para', fs.map(f => f.pixel_id)); continue; }

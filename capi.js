@@ -17,12 +17,6 @@ function hash(value) {
     .digest('hex');
 }
 
-// telefone: só dígitos antes de hashear
-function hashPhone(value) {
-  if (!value) return undefined;
-  return hash(String(value).replace(/\D/g, ''));
-}
-
 // separa nome completo em first/last (equivale aos RegEx do container)
 function splitName(full) {
   if (!full) return { fn: undefined, ln: undefined };
@@ -61,7 +55,7 @@ function buildPurchaseEvent({ funnel, sale, store }) {
 
   return clean({
     event_name: 'Purchase',
-    event_time: Math.floor(Date.now() / 1000),
+    event_time: sale.event_time || Math.floor(Date.now() / 1000),
     // event_id derivado da TRANSACAO, nao do sck. O sck identifica a sessao:
     // uma compra + um upsell na mesma sessao geravam o mesmo event_id e a Meta
     // descartava o segundo. A dedupe da Meta so opera entre eventos de mesmo
@@ -105,4 +99,4 @@ function clean(obj) {
   return out;
 }
 
-module.exports = { sendPurchase, buildPurchaseEvent, hash, hashPhone };
+module.exports = { sendPurchase, buildPurchaseEvent, hash };

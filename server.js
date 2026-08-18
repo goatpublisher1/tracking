@@ -51,8 +51,9 @@ setInterval(recarregaOrigens, 5 * 60 * 1000).unref();
 // da Task 5 (PAYT_AUTH_ENFORCE): o gate nasce desligado, só loga quem seria
 // negado, e só passa a negar de verdade com CORS_ALLOWLIST_ENFORCE=1.
 // CORS só na rota /collect (o webhook e o /health não são chamados por
-// browser). Allow-Credentials foi removido incondicionalmente nos dois
-// modos: nenhum endpoint usa cookie ou sessão.
+// browser). Allow-Credentials volta a viajar junto do Origin: nao pode ficar
+// fora do gate, senao um checkout com `credentials:'include'` perde o
+// preflight sem log nenhum e o kill switch nao desfaz.
 app.use('/collect', function (req, res, next) {
   const o = req.headers.origin;
   if (o) console.log('CORS_ORIGIN', o);
@@ -60,8 +61,12 @@ app.use('/collect', function (req, res, next) {
   if (o && !permitida) console.warn('CORS_ORIGEM_NEGADA', o);
   // enforce desligado: reflete mesmo assim (comportamento de hoje). O log
   // CORS_ORIGEM_NEGADA acima e o sinal que decide quando ligar o enforce.
-  if (permitida || (o && process.env.CORS_ALLOWLIST_ENFORCE !== '1')) {
+  // allowlist vazia = nunca carregou (cold start / banco fora do ar) — nao e
+  // informacao suficiente pra negar ninguem, entao falha aberto ate o
+  // proximo reload (5 min) em vez de derrubar todo mundo por ate 5 min.
+  if (o && (permitida || !origensPermitidas.size || process.env.CORS_ALLOWLIST_ENFORCE !== '1')) {
     res.header('Access-Control-Allow-Origin', o);
+    res.header('Access-Control-Allow-Credentials', 'true');
   }
   res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -108,11 +113,13 @@ app.post('/collect', async (req, res) => {
 
     const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
     const funnel = await funnelByDomain(host);
-    if (!funnel) console.warn('FUNIL_NAO_RESOLVIDO', JSON.stringify({ host, sck: b.sck || null }));
     if (!b.sck) {
       console.log('collect sem sck. body recebido:', JSON.stringify(req.body).slice(0, 200));
       return res.status(400).json({ error: 'missing sck' });
     }
+    // depois do guard de sck: bot batendo em host desconhecido sem sck nao
+    // e o caso que o runbook manda gregar aqui — so afoga o sinal real.
+    if (!funnel) console.warn('FUNIL_NAO_RESOLVIDO', JSON.stringify({ host, sck: b.sck || null }));
 
     // grava/atualiza o store (equivale ao Stape Store Writer) — chave = sck
     await pool.query(
@@ -281,6 +288,7 @@ app.post('/webhook/payt', async (req, res) => {
     // NULLs, entao o ON CONFLICT nunca dispara (venda duplicada por reenvio) e
     // o UPDATE de capi_sent casa zero linhas.
     const txId = p?.transaction_id ?? p?.transaction?.id ?? p?.id ?? null;
+    if (!p?.transaction_id && txId) console.warn('PAYT_TXID_FALLBACK', txId);
     if (!txId) {
       console.error('PAYT_SEM_TXID', JSON.stringify(p).slice(0, 500));
       return res.json({ ok: false, motivo: 'sem_transaction_id' });
@@ -308,6 +316,7 @@ app.post('/webhook/payt', async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
        ON CONFLICT (transaction_id) DO UPDATE SET
          status = EXCLUDED.status,
+         event_id = EXCLUDED.event_id,
          -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
          value = GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0)),
          total_price = GREATEST(COALESCE(EXCLUDED.total_price,0), COALESCE(sales.total_price,0)),
