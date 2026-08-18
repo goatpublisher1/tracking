@@ -255,3 +255,51 @@ DELETE FROM event_log WHERE created_at < now() - interval '90 days';
 **Risco: baixo**, conforme a brief — se o hash mudar e não melhorar nada, o pior caso é continuar sem casar, que já é o estado atual.
 
 **Step 8 da brief (conferir a pontuação de qualidade de correspondência no Gerenciador de Eventos da Meta) é ação do operador, não pode ser feito neste ambiente.** Depois do deploy, aguarde ~3 dias e confira, no pixel de cada funil, Gerenciador de Eventos → "Qualidade da correspondência de eventos" — os campos `ct`, `st`, `country` e `ph` devem sair de ~0 para valores reais.
+
+## Task 10: CORS por allowlist, token da Meta fora da URL, rate limit (I6 + M2 + M7)
+
+`server.js` agora carrega uma allowlist de origens a partir de `funnels.domain` (recarregada a cada 5 min, `.unref()` para não segurar o processo vivo) e aplica CORS **só na rota `/collect`** — o webhook e o `/health` não são chamados por browser. `Access-Control-Allow-Credentials` foi removido incondicionalmente: nenhum endpoint usa cookie ou sessão, e a combinação antiga (origin refletido + credentials) neutralizava a same-origin policy para qualquer endpoint de leitura que este serviço venha a ganhar. `capi.js` agora manda `access_token` no corpo do POST em vez da query string (a URL some de qualquer log/trace que a imprima).
+
+**A brief original pedia log-e-espera-48h antes de restringir (Step 1), assumindo deploy tarefa-por-tarefa. Esta branch sobe tudo de uma vez, então esse intervalo não existe.** Em vez disso, o CORS usa o mesmo esquema de kill switch da Task 5 (`PAYT_AUTH_ENFORCE`):
+
+- `CORS_ORIGIN <origem>` é logado **sempre**, para toda requisição em `/collect` com header `Origin` — é essa janela de observação, ligada desde o primeiro deploy, que substitui as 48h da brief.
+- A restrição de verdade só entra com `CORS_ALLOWLIST_ENFORCE=1` no ambiente. Com a variável ausente (estado inicial), uma origem fora da allowlist ainda é refletida em `Access-Control-Allow-Origin` — comportamento de hoje preservado — mas gera `CORS_ORIGEM_NEGADA <origem>`, o sinal de quem seria bloqueado. Com `CORS_ALLOWLIST_ENFORCE=1`, essa mesma origem para de receber o header (sem refletir), mantendo só o log.
+- `sendBeacon` com `Content-Type: text/plain` é uma requisição "simples" — o browser a envia mesmo sem CORS de resposta favorável, então o dado continua chegando ao servidor mesmo com uma origem negada. `CORS_ORIGEM_NEGADA` é o alerta, não um bloqueio de dados.
+
+**Risco: MÉDIO, reduzido a baixo pelo log incondicional.** O modo de falha é um domínio de funil legítimo (ou uma variação de subdomínio não coberta pelos três padrões — `https://dominio`, `https://www.dominio`, `https://track.dominio`) ficar de fora da allowlist quando `CORS_ALLOWLIST_ENFORCE=1` for ligado.
+
+### 1. Deploy com o enforce desligado
+
+Suba esta branch com `CORS_ALLOWLIST_ENFORCE` **ausente**. O comportamento de resposta ao browser não muda (origem continua refletida); `Access-Control-Allow-Credentials` já sai removido neste primeiro deploy — isso é seguro incondicionalmente, não depende do enforce.
+
+### 2. Critério de liberação (antes de ligar o enforce)
+
+Observe os logs de produção por alguns dias cobrindo tráfego real de todos os funis ativos. Procure `CORS_ORIGEM_NEGADA`:
+
+- Origem de scanner/bot aleatório: esperado, não bloqueia a liberação.
+- Origem que é claramente um domínio (ou subdomínio) de funil real: falta na allowlist. Confirme se `funnels.domain` está cadastrado e ativo para esse funil, ou se o padrão de subdomínio usado (ex.: `checkout.dominio` em vez de `track.dominio`) não é um dos três gerados por `recarregaOrigens`. Ajuste o dado em `funnels` (não o código) sempre que possível — o dado errado/ausente é o caso comum.
+
+**Critério para ligar o enforce:** zero entradas `CORS_ORIGEM_NEGADA` com origem de funil real no período observado.
+
+### 3. Ligar o enforce
+
+No Coolify, defina `CORS_ALLOWLIST_ENFORCE=1` e reinicie (restart, sem rebuild).
+
+### 4. Rollback
+
+Remova `CORS_ALLOWLIST_ENFORCE` (ou defina qualquer valor diferente de `'1'`) e reinicie. Volta a refletir qualquer origem, exatamente como no passo 1 — sem perder o log `CORS_ORIGEM_NEGADA`.
+
+### 5. Validar que a Meta aceita `access_token` no corpo (Step 4 da brief — não pôde ser feito neste ambiente)
+
+Este passo exige um pixel e um `capi_token` reais; não há como simular sem produção. Depois do deploy, faça uma venda de teste (ou rode `node scripts/reprocessa-capi.js` numa transação conhecida) e confirme `httpStatus: 200` em `sales.capi_response`. **Se a Meta recusar o token no corpo, reverta só este passo** (`capi.js`, volta o token para a query string) — a mudança de CORS e a de rate limit são independentes e não precisam ser revertidas junto.
+
+### 6. Rate limit no Traefik (Step 5 da brief — documentação apenas, sem código)
+
+O Traefik já está na frente do serviço. No Coolify, adicione as labels ao serviço:
+
+```
+traefik.http.middlewares.tracking-rl.ratelimit.average=30
+traefik.http.middlewares.tracking-rl.ratelimit.burst=60
+```
+
+Zero código, zero dependência nova. Ajuste os números ao volume real de `/collect`: some os pageviews de checkout por minuto no pico entre todos os funis e dobre a margem.

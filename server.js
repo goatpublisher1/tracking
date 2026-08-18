@@ -24,14 +24,47 @@ const app = express();
 // 1 = confia apenas no proxy imediato (não em X-Forwarded-For arbitrário).
 app.set('trust proxy', 1);
 
-// CORS: autoriza requisições do /collect vindas de qualquer origem.
-// O /collect só grava dados de tracking (não expõe leitura), então liberar
-// a origem é seguro aqui e resolve o "blocked:origin" do sendBeacon/fetch.
-app.use(function (req, res, next) {
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+// CORS: allowlist carregada dos funis, recarregada a cada 5 min para pegar
+// dominio novo sem redeploy. Sem isso, refletir qualquer Origin + credentials
+// (comportamento antigo) neutraliza a same-origin policy para qualquer
+// endpoint de leitura que este servico venha a ganhar no futuro.
+let origensPermitidas = new Set();
+async function recarregaOrigens() {
+  try {
+    const { rows } = await pool.query('SELECT domain FROM funnels WHERE active');
+    const s = new Set();
+    for (const r of rows) {
+      if (!r.domain) continue;
+      const bare = r.domain.replace(/^www\./, '');
+      s.add('https://' + bare);
+      s.add('https://www.' + bare);
+      s.add('https://track.' + bare);
+    }
+    origensPermitidas = s;
+  } catch (e) { console.error('CORS_RELOAD_ERRO', e); }
+}
+recarregaOrigens();
+setInterval(recarregaOrigens, 5 * 60 * 1000).unref();
+
+// CORS_ORIGIN fica sempre ligado: é a janela de observação que substitui o
+// deploy-e-espera-48h da brief (aqui tudo sobe de uma vez só). Mesmo esquema
+// da Task 5 (PAYT_AUTH_ENFORCE): o gate nasce desligado, só loga quem seria
+// negado, e só passa a negar de verdade com CORS_ALLOWLIST_ENFORCE=1.
+// CORS só na rota /collect (o webhook e o /health não são chamados por
+// browser). Allow-Credentials foi removido incondicionalmente nos dois
+// modos: nenhum endpoint usa cookie ou sessão.
+app.use('/collect', function (req, res, next) {
+  const o = req.headers.origin;
+  if (o) console.log('CORS_ORIGIN', o);
+  const permitida = o && origensPermitidas.has(o);
+  if (o && !permitida) console.warn('CORS_ORIGEM_NEGADA', o);
+  // enforce desligado: reflete mesmo assim (comportamento de hoje). O log
+  // CORS_ORIGEM_NEGADA acima e o sinal que decide quando ligar o enforce.
+  if (permitida || (o && process.env.CORS_ALLOWLIST_ENFORCE !== '1')) {
+    res.header('Access-Control-Allow-Origin', o);
+  }
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });

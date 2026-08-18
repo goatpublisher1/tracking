@@ -79,8 +79,10 @@ function buildPurchaseEvent({ funnel, sale, store }) {
 async function sendPurchase({ funnel, sale, store }) {
   const event = buildPurchaseEvent({ funnel, sale, store });
 
-  const url = `${GRAPH}/${funnel.pixel_id}/events?access_token=${funnel.capi_token}`;
-  const body = { data: [event] };
+  const url = `${GRAPH}/${funnel.pixel_id}/events`;
+  // token no corpo, nao na query: a URL aparece em qualquer log de erro
+  // que a imprima e em traces de biblioteca HTTP.
+  const body = { data: [event], access_token: funnel.capi_token };
 
   const res = await fetch(url, {
     method: 'POST',
