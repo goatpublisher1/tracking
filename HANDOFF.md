@@ -1,5 +1,24 @@
 # Handoff: Production Access Required
 
+## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
+
+1. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
+2. **Gerar e configurar o token do webhook.** Isto está ausente do handoff até agora, e sem ele o critério de liberação do Task 5 nunca pode ser cumprido — o gate fica no ar mas o token nunca é validado de verdade. Gere com:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+   Configure o valor gerado como `PAYT_WEBHOOK_TOKEN` no Coolify, e troque a URL do webhook cadastrada no painel da PayT. O código aceita o token de duas formas: header `x-payt-token` (preferido — não vaza em log de acesso de proxy) ou `?t=<TOKEN>` na query string.
+3. **Conferir os produtos cadastrados.**
+   ```sql
+   SELECT product_code, offer_type, send_to_meta, active FROM products ORDER BY funnel_slug;
+   ```
+   Confirme que todo upsell está marcado corretamente — a partir do `event_id` por transação (Task 6), upsells deixam de colidir com a venda principal e passam a ser enviados à Meta individualmente, então um `send_to_meta` errado aqui agora tem efeito imediato.
+4. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
+
+Feito isso: suba a branch com **`PAYT_AUTH_ENFORCE` e `CORS_ALLOWLIST_ENFORCE` ambos ausentes/desligados**. Os dois entram em modo shadow (só logam) até os critérios de liberação das seções Task 5 e Task 10 serem cumpridos.
+
+---
+
 The following steps require direct access to the production database and cannot be completed locally without Docker/psql.
 
 ## Step 1: Dump Production Schema
@@ -64,9 +83,22 @@ A later task will add `test/sql.test.sh`, which will need a Postgres instance wi
 
 ---
 
-**This handoff must be completed by the repo owner before Tasks 2–8 can run their full test suites.**
+**As Tasks numeradas abaixo já estão implementadas e commitadas** (não são trabalho pendente de código) — o que falta é executá-las em produção, na ordem em que aparecem, seguindo o checklist pré-deploy no topo deste arquivo.
 
 ---
+
+## Task 2: Verificar `trust proxy` (rodar só depois do deploy)
+
+`server.js` trocou `b.ip || req.ip` por `req.ip || b.ip` (ver commit da Task 2), fazendo o IP derivado do proxy imediato ser a única fonte de `client_ip_address`. Isso é correto se o Coolify/Traefik é a única camada na frente do serviço. Se houver uma segunda camada (ex.: Cloudflare) na frente do Traefik, `trust proxy 1` devolve o IP da borda (Cloudflare) em vez do IP do visitante — degradando silenciosamente `client_ip_address` na Meta, exatamente o defeito que a mudança pretendia corrigir, só que invertido.
+
+Confirme com tráfego real após o deploy:
+
+```sql
+SELECT ip_override, count(*) FROM store WHERE created_at > now() - interval '1 hour'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 20;
+```
+
+Esperado: IPs residenciais variados, não `172.x` (rede interna do Docker) e não um punhado de IPs repetidos (sinal de estar pegando a borda de um CDN/proxy em vez do visitante).
 
 ## Task 3: Corrigir vendas já corrompidas (rodar só depois do deploy)
 
@@ -157,6 +189,12 @@ Procure `PAYT_AUTH_NEGADO` nos logs.
 
 - `tx: null` com IPs desconhecidos: varredura da internet — exatamente o que o gate existe para barrar. Não requer ação.
 - `tx` preenchido: uma venda real está sendo rejeitada. Desligue o enforce (`PAYT_AUTH_ENFORCE=0` + restart) e investigue antes de religar.
+
+## Task 6: Verificar dedupe de upsell (rodar só depois do deploy)
+
+`capi.js` agora deriva `event_id` da transação (`purchase_<transaction_id>`) em vez do `sck` (ver commit `5d3c837`). Depois de uma venda real com upsell na mesma sessão, confirme no Gerenciador de Eventos da Meta que aparecem **dois** eventos `Purchase` com `event_id`s distintos (um por transação).
+
+**Aviso: o volume de `Purchase` na Meta vai subir depois deste deploy.** Antes, a venda principal e o upsell da mesma sessão compartilhavam `event_id = sck`, e a Meta descartava o segundo evento como duplicata. Esse é o comportamento pretendido pela correção — mais eventos reais chegando —, mas para uma operação que otimiza campanhas nesse sinal é uma mudança de baseline a se antecipar (não é anomalia, não precisa de investigação).
 
 ## Task 7: Alerta CAPI_FALHOU e reprocessamento (rodar só depois do deploy)
 
@@ -345,3 +383,13 @@ npm ci --dry-run
 Retornou `up to date` sem nenhuma resolução pendente — o `npm ci` do Dockerfile tem o que precisa.
 
 **Este é o único deploy da branch que muda como as dependências são instaladas — acompanhe de perto.** Se o container não subir, `git revert` deste commit volta ao `npm install` anterior (sem lockfile, sem `USER node`).
+
+## Pendências conhecidas
+
+Achados menores da revisão final, deferidos de propósito. `.superpowers/` (onde ficava o histórico completo de decisões) não vai para o repo — este é o registro que sobrevive ao clone.
+
+- **Allowlist de CORS cobre só `https://` + `www.` + `track.` de cada domínio** — não `http://`, não portas, não um subdomínio de checkout arbitrário. **Resolva isto antes de ligar `CORS_ALLOWLIST_ENFORCE`**, usando os logs de `CORS_ORIGEM_NEGADA` para achar o que falta.
+- `sales` não tem `customer_name` — eventos reprocessados chegam à Meta sem `fn`/`ln`, com qualidade de correspondência pior que a de um evento normal do webhook.
+- `VENDA_SEM_COMISSAO` loga `p.commission` cru — revise antes de configurar retenção de log longa (o log `PAYT_WEBHOOK` grava o payload inteiro de qualquer forma, e é o problema de PII maior dos dois).
+- O script de reprocessamento não grava em `event_log` — reenvios não têm a paridade de auditoria que o webhook tem.
+- `normPais` só reconhece `br`/`brasil`/`brazil`; `normTelefone` prefixa `55` em qualquer número de 10–11 dígitos. Adequado para uma operação só-Brasil; os dois descartam ou forçam em vez de mandar um hash que nunca vai casar.

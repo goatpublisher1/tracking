@@ -19,12 +19,17 @@ domínio dela.
 | `PORT` | não | Padrão 3000 |
 
 ## Schema
-`schema.sql` tem o DDL das 6 tabelas. Para recriar do zero:
+`schema.sql` **ainda não existe** neste repo (nunca existiu — `git log --all -- schema.sql`
+não retorna nada). Ele é gerado a partir da produção seguindo o checklist
+pré-deploy no topo do `HANDOFF.md` (`pg_dump --schema-only` das 6 tabelas:
+`funnels`, `sales`, `clicks`, `store`, `event_log`, `products`). Depois de
+gerado e commitado, recria-se do zero com:
 `psql "$DATABASE_URL" -f schema.sql`
 
 ## Testes
 `npm test` (node:test, sem dependências). `./test/sql.test.sh` exige um Postgres
-com o schema aplicado.
+com o schema aplicado a partir de `schema.sql` — como esse arquivo ainda não
+existe no repo, este teste nunca rodou.
 
 ## Deploy
 Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
