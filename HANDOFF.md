@@ -303,3 +303,45 @@ traefik.http.middlewares.tracking-rl.ratelimit.burst=60
 ```
 
 Zero código, zero dependência nova. Ajuste os números ao volume real de `/collect`: some os pageviews de checkout por minuto no pico entre todos os funis e dobre a margem.
+
+## Task 11: Build reproduzível e container sem root (I10)
+
+O `Dockerfile` rodava `npm install` sem lockfile versionado — nunca existiu um neste repo. Com ranges `^` em `express` e `pg`, cada rebuild reresolvia toda a árvore transitiva: um redeploy de sexta-feira podia subir dependências nunca testadas, e é o vetor clássico de supply-chain num container que segura o `DATABASE_URL` e alcança o `capi_token` de todos os funis. `npm ci --omit=dev` agora exige o lockfile e instala exatamente o que ele pina. Separadamente, o processo rodava como root sem motivo — `node:20-slim` já traz o usuário `node`; o Dockerfile agora troca para ele antes do `CMD`.
+
+**O Step 1 da brief (`npm ls --depth=0` no container do Coolify, para pinar as versões que já rodam em produção) não pôde ser executado neste ambiente — não há acesso ao container.** O `package-lock.json` deste commit foi gerado com `npm install --package-lock-only` a partir do `package.json` atual, sem tocar nas dependências declaradas (`express: ^4.19.2`, `pg: ^8.11.5`). Isso pina o que o npm resolve **hoje**, que pode não ser o que está no ar há meses.
+
+**Versões pinadas neste lockfile:**
+- `express` → `4.22.2`
+- `pg` → `8.23.0`
+
+### Antes de dar deploy nesta branch
+
+1. No terminal do container em produção (Coolify):
+   ```bash
+   npm ls --depth=0
+   ```
+2. Compare as versões de `express` e `pg` ali com as pinadas acima.
+3. **Se forem iguais:** nada a fazer, o comportamento do `npm ci` é idêntico ao `npm install` que já rodava.
+4. **Se forem diferentes:** regenere o lock pinando as versões de produção antes de dar deploy:
+   ```bash
+   npm install --package-lock-only express@X pg@Y
+   ```
+   (troque `X` e `Y` pelas versões vistas no `npm ls --depth=0` do container), commit o `package-lock.json` resultante, e só então faça deploy.
+
+### Smoke test do owner antes do deploy (Step 3 da brief — não pôde ser rodado neste ambiente, sem docker)
+
+```bash
+docker build -t tracking-teste .
+docker run --rm -e DATABASE_URL="postgresql://postgres:test@host.docker.internal:55432/postgres" -p 3001:3000 tracking-teste
+curl -s http://localhost:3001/health
+```
+Esperado: `{"ok":true}`.
+
+### Prova local de que o lock está em sincronia com o `package.json` (sem rede, sem docker)
+
+```bash
+npm ci --dry-run
+```
+Retornou `up to date` sem nenhuma resolução pendente — o `npm ci` do Dockerfile tem o que precisa.
+
+**Este é o único deploy da branch que muda como as dependências são instaladas — acompanhe de perto.** Se o container não subir, `git revert` deste commit volta ao `npm install` anterior (sem lockfile, sem `USER node`).

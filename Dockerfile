@@ -7,12 +7,18 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# instala só as dependências primeiro (cache de build)
-COPY package.json ./
-RUN npm install --omit=dev
+# npm ci exige o lockfile e instala exatamente as versoes pinadas.
+# Com npm install + ranges ^, cada rebuild resolvia versoes diferentes de
+# toda a arvore transitiva — deploy podia subir codigo nunca testado.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # copia o restante do código
 COPY . .
+
+# a imagem node:20-slim ja traz o usuario 'node'. Sem isto o processo roda
+# como root com o DATABASE_URL e alcance a todos os capi_token.
+USER node
 
 EXPOSE 3000
 
