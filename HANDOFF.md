@@ -245,3 +245,13 @@ console.log('PAYT', p?.transaction_id, sck, statusBruto, value);
 ```sql
 DELETE FROM event_log WHERE created_at < now() - interval '90 days';
 ```
+
+## Task 9: Normalização de geo e telefone no formato da Meta (I9)
+
+`geo.js` (novo) exporta `normCidade`, `normEstado`, `normPais`, `normTelefone`. `capi.js` agora hasheia `ct`/`st`/`country`/`ph` já normalizados (sem acento/espaço/pontuação para cidade, sigla de 2 letras para estado, ISO alpha-2 para país, E.164 com DDI 55 para telefone BR de 10-11 dígitos) em vez de só `trim().toLowerCase()`. Antes disso os três campos de geo eram enviados, contavam como preenchidos no relatório de qualidade de correspondência da Meta e nunca casavam com nada.
+
+**Step 1 da brief não pôde ser confirmado — sem acesso a produção.** Rode a query (e) do Step 2 desta handoff (`SELECT state, country, count(*) FROM store GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20;`) para ver o que `store.state`/`store.country` realmente contêm hoje. Isso é informativo, não bloqueante: `normEstado`/`normPais` tratam os dois formatos — sigla de 2 letras passa direto, nome por extenso mapeia pelo dicionário `UF` (só os 26 estados + DF, sem sinônimos além de `brasil`/`brazil` para país). Se `state` tiver algo fora do mapa (abreviação de outro país, erro de digitação, etc.), `normEstado` devolve `undefined`, `hash(undefined)` também devolve `undefined` (`capi.js`, linha `if (value === undefined || value === null || value === '') return undefined;`), e `clean()` remove a chave do `user_data` em vez de mandar um hash que nunca vai casar — estritamente melhor que o comportamento anterior.
+
+**Risco: baixo**, conforme a brief — se o hash mudar e não melhorar nada, o pior caso é continuar sem casar, que já é o estado atual.
+
+**Step 8 da brief (conferir a pontuação de qualidade de correspondência no Gerenciador de Eventos da Meta) é ação do operador, não pode ser feito neste ambiente.** Depois do deploy, aguarde ~3 dias e confira, no pixel de cada funil, Gerenciador de Eventos → "Qualidade da correspondência de eventos" — os campos `ct`, `st`, `country` e `ph` devem sair de ~0 para valores reais.

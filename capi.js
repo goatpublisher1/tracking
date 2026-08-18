@@ -5,6 +5,7 @@
 //  event_id = "purchase_" + transaction_id  (protege contra reenvio).
 // =====================================================================
 const crypto = require('crypto');
+const { normCidade, normEstado, normPais, normTelefone } = require('./geo');
 
 const GRAPH = 'https://graph.facebook.com/v20.0';
 
@@ -38,11 +39,11 @@ function buildPurchaseEvent({ funnel, sale, store }) {
 
   const user_data = clean({
     em: hash(sale.customer_email),
-    ph: hashPhone(sale.customer_phone),
+    ph: hash(normTelefone(sale.customer_phone)),
     fn, ln,
-    ct: hash(store?.city),
-    st: hash(store?.state),
-    country: hash(store?.country),
+    ct: hash(normCidade(store?.city)),
+    st: hash(normEstado(store?.state)),
+    country: hash(normPais(store?.country)),
     client_user_agent: store?.user_agent || undefined,
     client_ip_address: store?.ip_override || undefined,
     fbc: store?.fbc || undefined,
