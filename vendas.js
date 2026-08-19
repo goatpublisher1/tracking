@@ -64,8 +64,8 @@ async function processarVenda(pool, venda) {
     `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
        currency, product_code, product_name, customer_email, customer_phone,
        utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
-       payment_method, paid_at, upsell_from, city, state, country, customer_ip)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+       payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
      ON CONFLICT (transaction_id) DO UPDATE SET
        status = EXCLUDED.status,
        event_id = EXCLUDED.event_id,
@@ -98,7 +98,7 @@ async function processarVenda(pool, venda) {
      click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType,
      venda.paymentMethod, venda.paidAt, venda.upsellFrom,
      (store?.city || null), (store?.state || null), (store?.country || null),
-     (venda.ip || store?.ip_override || null)]
+     (venda.ip || store?.ip_override || null), venda.origem]
   );
 
   // ---- CAPI para CADA pixel ativo do dominio (multi-conta)

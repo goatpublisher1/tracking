@@ -384,6 +384,30 @@ Retornou `up to date` sem nenhuma resolução pendente — o `npm ci` do Dockerf
 
 **Este é o único deploy da branch que muda como as dependências são instaladas — acompanhe de perto.** Se o container não subir, `git revert` deste commit volta ao `npm install` anterior (sem lockfile, sem `USER node`).
 
+## Digistore24 — coluna `plataforma`
+
+`vendas.js` agora grava `plataforma` (`venda.origem`) em cada `INSERT` de `sales` — hoje sempre `'payt'`, e passará a valer `'digistore24'` quando o normalizador da Digistore24 entrar (task futura). A coluna é puramente aditiva, sem constraint, e o código anterior a este commit ignorava qualquer coluna extra — não há janela de incompatibilidade entre rodar o `ALTER TABLE` e subir o deploy.
+
+**Rodar antes do deploy**, num ambiente com acesso à produção (este ambiente de desenvolvimento não tem):
+
+```bash
+node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
+```
+
+Confira:
+
+```bash
+node scripts/q.js "SELECT plataforma, count(*) FROM sales GROUP BY 1"
+```
+
+Esperado: uma linha, `payt`, com o total de vendas.
+
+### Rollback
+
+```sql
+ALTER TABLE sales DROP COLUMN plataforma
+```
+
 ## Pendências conhecidas
 
 Achados menores da revisão final, deferidos de propósito. `.superpowers/` (onde ficava o histórico completo de decisões) não vai para o repo — este é o registro que sobrevive ao clone.
