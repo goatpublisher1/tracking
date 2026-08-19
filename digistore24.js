@@ -36,4 +36,45 @@ function assinaturaValida(params, passphrase) {
   return tokenValido(recebida.toUpperCase(), esperada);
 }
 
-module.exports = { assinaturaValida, stringParaAssinar };
+const PREFIXO = 'ds24_';
+
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Os valores da Digistore24 ja vem em unidade monetaria (97.00), nao em
+// centavos como na PayT — por isso nao ha divisao por 100 aqui.
+function normalizarDigistore(params) {
+  const p = (params && typeof params === 'object' && !Array.isArray(params)) ? params : {};
+
+  const txBruto = p.transaction_id || null;
+  const nome = [p.address_first_name, p.address_last_name]
+    .filter(Boolean).join(' ') || null;
+
+  return {
+    origem: 'digistore24',
+    txId: txBruto ? PREFIXO + txBruto : null,
+    txIdBruto: txBruto,
+    sck: p.custom || null,
+    src: p.sid1 || null,
+    status: p.transaction_type || p.billing_status || null,
+    // transaction_type: payment | refund | chargeback
+    paid: p.transaction_type === 'payment',
+    teste: p.api_mode === 'test',
+    value: num(p.amount_vendor),      // a parte do vendedor
+    total: num(p.amount_brutto),      // o que o cliente pagou
+    productCode: p.product_id ? PREFIXO + p.product_id : null,
+    productName: p.product_name || null,
+    email: p.buyer_email || null,
+    phone: p.address_phone_no || null,
+    nome,
+    paymentMethod: p.pay_method || null,
+    paidAt: p.transaction_processed_at || null,
+    upsellFrom: p.order_id || null,
+    ip: null,                          // o IPN nao traz o ip do comprador
+    pixelId: null,
+  };
+}
+
+module.exports = { assinaturaValida, stringParaAssinar, normalizarDigistore };
