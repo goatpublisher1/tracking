@@ -11,6 +11,7 @@ const { Pool } = require('pg');
 const { normalizeUtms } = require('./normalize');
 const { sendPurchase } = require('./capi');
 const { tokenValido } = require('./auth');
+const { normalizarPayt } = require('./payt');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // Um client ocioso que recebe erro do backend (restart do Postgres, failover,
@@ -189,50 +190,18 @@ app.post('/webhook/payt', async (req, res) => {
     // Remover depois de identificar a estrutura.
     try { console.log('PAYT_WEBHOOK', JSON.stringify(p).slice(0, 2000)); } catch (e) {}
 
-    // status de pagamento fica em transaction.payment_status; o de order em status
-    const paid = p?.transaction?.payment_status === 'paid' || p?.status === 'paid';
-    // valor bruto usado so para log/diagnostico (nao alimenta `paid` acima,
-    // que preserva o OR original: || aqui trocaria a semantica em casos onde
-    // transaction.payment_status vem preenchido mas != 'paid' e status == 'paid').
-    const statusBruto = p?.transaction?.payment_status || p?.status || null;
+    const venda = normalizarPayt(p);
+    const { sck, src, paid, value, total, txId } = venda;
+    const statusBruto = venda.status;
+
+    if (!p?.transaction_id && txId) console.warn('PAYT_TXID_FALLBACK', txId);
+
     // se a PayT mudar o vocabulario de status, hoje as conversoes parariam de
     // ser enviadas sem nenhum sinal. Este log e o sinal.
     const CONHECIDOS = ['paid','waiting_payment','pending','refused','canceled','refunded','chargeback','expired'];
     if (statusBruto && !CONHECIDOS.includes(statusBruto)) {
       console.warn('PAYT_STATUS_DESCONHECIDO', statusBruto, p?.transaction_id);
     }
-    // sck = identificador único (chave do store-lookup); src = origem/UTMs
-    // A PayT expõe os parametros da URL em locais que variam; procuramos em vários.
-    function digSck(o) {
-      if (!o || typeof o !== 'object') return null;
-      // todos os caminhos onde a PayT pode por o sck (varia por venda)
-      const paths = [
-        o?.link?.query_params?.sck,          // <- caso mais comum (nosso idx_)
-        o?.customer?.origin?.query_params?.sck,
-        o?.link?.sources?.sck,
-        o?.sources?.sck,
-        o?.query_params?.sck,
-        o?.url_parameters?.sck,
-        o?.url_params?.sck,
-        o?.tracking?.sck,
-        o?.checkout?.url_parameters?.sck,
-        o?.sck,
-      ].filter(Boolean);
-      // prioriza o nosso sck (idx_), que casa com o store; senao usa o primeiro
-      const nosso = paths.find(v => typeof v === 'string' && v.indexOf('idx_') === 0);
-      return nosso || paths[0] || null;
-    }
-    function digSrc(o) {
-      const paths = [
-        o?.link?.query_params?.src, o?.link?.sources?.src, o?.sources?.src,
-        o?.query_params?.src, o?.url_parameters?.src,
-        o?.url_params?.src, o?.tracking?.src, o?.src,
-      ];
-      for (const v of paths) if (v) return v;
-      return null;
-    }
-    const sck = digSck(p) || p?.customer?.origin?.query_params?.click_id || null;
-    const src = digSrc(p) || null;
 
     // valida origem pelo integration_key contra o segredo do funil (se houver)
     let funnel = null;
@@ -247,7 +216,7 @@ app.post('/webhook/payt', async (req, res) => {
     // e tambem classifica o tipo de oferta (principal/upsell/backend/...)
     let offerType = null;
     let sendToMeta = true;  // padrao: envia (produto nao cadastrado = envia)
-    const prodCode = p?.product?.code;
+    const prodCode = venda.productCode;
     if (prodCode) {
       const pr = await pool.query(
         `SELECT pr.offer_type, pr.send_to_meta, f.* FROM products pr
@@ -276,10 +245,6 @@ app.post('/webhook/payt', async (req, res) => {
     }
 
     // sempre grava a venda (mesmo não-paid) para o painel/atribuição
-    // value = comissão do PRODUTOR (busca por type, não índice fixo)
-    const producerComm = Array.isArray(p?.commission)
-      ? p.commission.find(c => c?.type === 'producer') : null;
-    const value = Number(producerComm?.amount ?? p?.commission?.[0]?.amount ?? 0) / 100;
     // commission nao-array faz o .find e o fallback [0] falharem -> value 0.
     // Purchase com value 0 conta como conversao e puxa o ROAS aprendido pra baixo.
     if (paid && !(value > 0)) {
@@ -287,13 +252,6 @@ app.post('/webhook/payt', async (req, res) => {
         tx: p?.transaction_id, commission: p?.commission,
       }));
     }
-    const total = Number(p?.transaction?.total_price ?? 0) / 100; // centavos -> reais
-    // A PayT varia a estrutura do payload (ver digSck). O transaction_id era
-    // lido de um caminho unico. Se vier undefined: UNIQUE aceita multiplos
-    // NULLs, entao o ON CONFLICT nunca dispara (venda duplicada por reenvio) e
-    // o UPDATE de capi_sent casa zero linhas.
-    const txId = p?.transaction_id ?? p?.transaction?.id ?? p?.id ?? null;
-    if (!p?.transaction_id && txId) console.warn('PAYT_TXID_FALLBACK', txId);
     if (!txId) {
       console.error('PAYT_SEM_TXID', JSON.stringify(p).slice(0, 500));
       return res.json({ ok: false, motivo: 'sem_transaction_id' });
@@ -344,16 +302,16 @@ app.post('/webhook/payt', async (req, res) => {
          offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
          payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
          paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
-      [txId, 'purchase_' + txId, sck, src, (p?.transaction?.payment_status || p?.status),
+      [txId, 'purchase_' + txId, sck, src, statusBruto,
        value, total, funnel?.currency || 'BRL',
-       p?.product?.code, p?.product?.name, p?.customer?.email, p?.customer?.phone,
+       venda.productCode, venda.productName, venda.email, venda.phone,
        click?.utm_source, click?.utm_campaign, click?.campaign_id,
        click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType,
-       (p?.transaction?.payment_method || null),
-       (p?.transaction?.paid_at || null),
-       (p?.transaction?.upsell_from || null),
+       venda.paymentMethod,
+       venda.paidAt,
+       venda.upsellFrom,
        (store?.city || null), (store?.state || null), (store?.country || null),
-       (p?.customer?.ip || store?.ip_override || null)]
+       (venda.ip || store?.ip_override || null)]
     );
 
     // dispara CAPI para CADA pixel ativo do domínio (multi-conta)
@@ -364,11 +322,11 @@ app.post('/webhook/payt', async (req, res) => {
       const sale = {
         transaction_id: txId,
         value,
-        product_code: p?.product?.code,
-        product_name: p?.product?.name,
-        customer_email: p?.customer?.email,
-        customer_phone: p?.customer?.phone,
-        customer_name: p?.customer?.name,
+        product_code: venda.productCode,
+        product_name: venda.productName,
+        customer_email: venda.email,
+        customer_phone: venda.phone,
+        customer_name: venda.nome,
       };
       const resultados = [];
       for (const f of funnels) {
