@@ -67,9 +67,9 @@ function normalizarPayt(payload) {
     email: p?.customer?.email ?? null,
     phone: p?.customer?.phone ?? null,
     nome: p?.customer?.name ?? null,
-    paymentMethod: p?.transaction?.payment_method ?? null,
-    paidAt: p?.transaction?.paid_at ?? null,
-    upsellFrom: p?.transaction?.upsell_from ?? null,
+    paymentMethod: p?.transaction?.payment_method || null,
+    paidAt: p?.transaction?.paid_at || null,
+    upsellFrom: p?.transaction?.upsell_from || null,
     ip: p?.customer?.ip ?? null,
     pixelId: p?.pixel_id ?? null,
   };

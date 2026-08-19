@@ -72,3 +72,13 @@ test('payload vazio, string ou null nao lanca', () => {
     assert.strictEqual(v.paid, false);
   }
 });
+
+test('campos de transaction usam || como o handler original: string vazia vira null', () => {
+  const v = normalizarPayt({
+    transaction_id: 'T1',
+    transaction: { payment_method: '', paid_at: '', upsell_from: '' },
+  });
+  assert.strictEqual(v.paymentMethod, null);
+  assert.strictEqual(v.paidAt, null);
+  assert.strictEqual(v.upsellFrom, null);
+});
