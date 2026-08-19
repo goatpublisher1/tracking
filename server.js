@@ -171,11 +171,16 @@ app.post('/webhook/payt', async (req, res) => {
     // Gate de autenticação. A politica de "sempre 200" cobre ERRO INTERNO;
     // requisicao nao autenticada nao e a PayT e recebe 401.
     // Desligavel em segundos pelo Coolify: PAYT_AUTH_ENFORCE=0, sem rebuild.
-    const tokenRecebido = req.get('x-payt-token') || req.query.t || '';
-    const tokenOk = tokenValido(tokenRecebido, process.env.PAYT_WEBHOOK_TOKEN);
-    if (!tokenOk) {
+    // A PayT manda integration_key no topo do payload e documenta que ela
+    // existe para validar a origem do postback. E uma chave de CONTA (a mesma
+    // para todos os postbacks), entao prova "veio da nossa PayT" — nao diz de
+    // qual funil. Atribuicao de funil/dominio continua vindo do sck.
+    const chave = typeof p?.integration_key === 'string' ? p.integration_key : '';
+    const chaveOk = tokenValido(chave, process.env.PAYT_INTEGRATION_KEY);
+    if (!chaveOk) {
       console.warn('PAYT_AUTH_NEGADO', JSON.stringify({
-        ip: req.ip, presente: !!tokenRecebido, tx: p?.transaction_id || null,
+        ip: req.ip, presente: !!chave, tx: p?.transaction_id || null,
+        teste: !!p?.test,
       }));
       if (process.env.PAYT_AUTH_ENFORCE === '1') return res.sendStatus(401);
     }

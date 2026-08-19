@@ -13,7 +13,7 @@ domínio dela.
 | Nome | Obrigatória | Descrição |
 |---|---|---|
 | `DATABASE_URL` | sim | Postgres |
-| `PAYT_WEBHOOK_TOKEN` | sim | Segredo do webhook. A URL cadastrada na PayT é `.../webhook/payt?t=<token>` |
+| `PAYT_INTEGRATION_KEY` | sim | Chave de integração da conta PayT (painel da PayT). O webhook valida o campo `integration_key` do payload contra ela. Nada a configurar na PayT. |
 | `PAYT_AUTH_ENFORCE` | não | `1` rejeita webhook sem token (401). Ausente = só loga. Kill switch. |
 | `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`. Ausente = origem ainda refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
 | `PORT` | não | Padrão 3000 |
