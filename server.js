@@ -12,6 +12,7 @@ const { normalizeUtms } = require('./normalize');
 const { sendPurchase } = require('./capi');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
+const { processarVenda } = require('./vendas');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // Um client ocioso que recebe erro do backend (restart do Postgres, failover,
@@ -88,14 +89,6 @@ async function funnelByDomain(host) {
   const { rows } = await pool.query(
     `SELECT * FROM funnels WHERE active AND (domain = $1 OR domain = $2 OR domain = $3) LIMIT 1`,
     [host, bare, 'www.' + bare]
-  );
-  return rows[0] || null;
-}
-
-// resolve o funil por pixel (usado no webhook, que não traz o domínio direto)
-async function funnelByPixel(pixelId) {
-  const { rows } = await pool.query(
-    `SELECT * FROM funnels WHERE active AND pixel_id = $1 LIMIT 1`, [pixelId]
   );
   return rows[0] || null;
 }
@@ -203,47 +196,6 @@ app.post('/webhook/payt', async (req, res) => {
       console.warn('PAYT_STATUS_DESCONHECIDO', statusBruto, p?.transaction_id);
     }
 
-    // valida origem pelo integration_key contra o segredo do funil (se houver)
-    let funnel = null;
-    if (p?.pixel_id) funnel = await funnelByPixel(p.pixel_id);
-    // fallback 1: pelo sck -> store -> funnel
-    if (!funnel && sck) {
-      const s = await pool.query('SELECT funnel_id FROM store WHERE sck=$1', [sck]);
-      if (s.rows[0]?.funnel_id)
-        funnel = (await pool.query('SELECT * FROM funnels WHERE id=$1', [s.rows[0].funnel_id])).rows[0];
-    }
-    // fallback 2: pelo product_code (tabela products) — resolve vendas sem sck
-    // e tambem classifica o tipo de oferta (principal/upsell/backend/...)
-    let offerType = null;
-    let sendToMeta = true;  // padrao: envia (produto nao cadastrado = envia)
-    const prodCode = venda.productCode;
-    if (prodCode) {
-      const pr = await pool.query(
-        `SELECT pr.offer_type, pr.send_to_meta, f.* FROM products pr
-         JOIN funnels f ON f.slug = pr.funnel_slug
-         WHERE pr.product_code = $1 AND pr.active AND f.active LIMIT 1`, [prodCode]);
-      if (pr.rows[0]) {
-        offerType = pr.rows[0].offer_type;
-        sendToMeta = pr.rows[0].send_to_meta !== false;
-        if (!funnel) funnel = pr.rows[0];
-      }
-    }
-
-    // fallback 3: se ainda não achou e existe apenas UM funil ativo, usa ele.
-    if (!funnel) {
-      const act = await pool.query('SELECT * FROM funnels WHERE active');
-      if (act.rows.length === 1) funnel = act.rows[0];
-    }
-
-    // MULTI-PIXEL: reúne TODOS os funis ativos do mesmo domínio do funil achado.
-    // Permite ter 2+ pixels (ex.: 2 contas de anúncios) recebendo o mesmo Purchase.
-    let funnels = [];
-    if (funnel) {
-      const all = await pool.query(
-        'SELECT * FROM funnels WHERE active AND domain = $1', [funnel.domain]);
-      funnels = all.rows.length ? all.rows : [funnel];
-    }
-
     // sempre grava a venda (mesmo não-paid) para o painel/atribuição
     // commission nao-array faz o .find e o fallback [0] falharem -> value 0.
     // Purchase com value 0 conta como conversao e puxa o ROAS aprendido pra baixo.
@@ -257,116 +209,7 @@ app.post('/webhook/payt', async (req, res) => {
       return res.json({ ok: false, motivo: 'sem_transaction_id' });
     }
 
-    // recupera dados do browser gravados no checkout
-    let store = null;
-    if (sck) {
-      const s = await pool.query('SELECT * FROM store WHERE sck=$1', [sck]);
-      store = s.rows[0] || null;
-    }
-    // pega snapshot de atribuição do clique mais recente desse src
-    let click = null;
-    if (sck) {
-      const c = await pool.query(
-        'SELECT * FROM clicks WHERE sck=$1 ORDER BY created_at DESC LIMIT 1', [sck]);
-      click = c.rows[0] || null;
-    }
-
-    await pool.query(
-      `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
-         currency, product_code, product_name, customer_email, customer_phone,
-         utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
-         payment_method, paid_at, upsell_from, city, state, country, customer_ip)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
-       ON CONFLICT (transaction_id) DO UPDATE SET
-         status = EXCLUDED.status,
-         event_id = EXCLUDED.event_id,
-         -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
-         value = GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0)),
-         total_price = GREATEST(COALESCE(EXCLUDED.total_price,0), COALESCE(sales.total_price,0)),
-         -- atribuicao: o PRIMEIRO valor nao-nulo vence (o clique original e a verdade)
-         sck = COALESCE(sales.sck, EXCLUDED.sck),
-         src = COALESCE(sales.src, EXCLUDED.src),
-         funnel_id = COALESCE(sales.funnel_id, EXCLUDED.funnel_id),
-         utm_source = COALESCE(sales.utm_source, EXCLUDED.utm_source),
-         utm_campaign = COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign),
-         campaign_id = COALESCE(sales.campaign_id, EXCLUDED.campaign_id),
-         adset_id = COALESCE(sales.adset_id, EXCLUDED.adset_id),
-         ad_id = COALESCE(sales.ad_id, EXCLUDED.ad_id),
-         city = COALESCE(sales.city, EXCLUDED.city),
-         state = COALESCE(sales.state, EXCLUDED.state),
-         country = COALESCE(sales.country, EXCLUDED.country),
-         customer_ip = COALESCE(sales.customer_ip, EXCLUDED.customer_ip),
-         -- estado da transacao: o MAIS RECENTE nao-nulo vence
-         customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
-         customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
-         offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
-         payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
-         paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
-      [txId, 'purchase_' + txId, sck, src, statusBruto,
-       value, total, funnel?.currency || 'BRL',
-       venda.productCode, venda.productName, venda.email, venda.phone,
-       click?.utm_source, click?.utm_campaign, click?.campaign_id,
-       click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType,
-       venda.paymentMethod,
-       venda.paidAt,
-       venda.upsellFrom,
-       (store?.city || null), (store?.state || null), (store?.country || null),
-       (venda.ip || store?.ip_override || null)]
-    );
-
-    // dispara CAPI para CADA pixel ativo do domínio (multi-conta)
-    // Só envia se o produto estiver marcado com send_to_meta = true.
-    // Upsell/backend ficam registrados no banco mas nao vao para a Meta,
-    // para nao inflar a otimizacao das campanhas.
-    if (paid && funnels.length && sendToMeta) {
-      const sale = {
-        transaction_id: txId,
-        value,
-        product_code: venda.productCode,
-        product_name: venda.productName,
-        customer_email: venda.email,
-        customer_phone: venda.phone,
-        customer_name: venda.nome,
-      };
-      const resultados = [];
-      for (const f of funnels) {
-        try {
-          const r = await sendPurchase({ funnel: f, sale, store });
-          resultados.push({ pixel: f.pixel_id, status: r.httpStatus, resp: r.response });
-          await pool.query(
-            `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
-             VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
-            ['purchase_' + txId, src, f.id, r.httpStatus, JSON.stringify(r.payload)]
-          );
-        } catch (err) {
-          resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });
-        }
-      }
-      // capi_sent = true se PELO MENOS um pixel aceitou
-      const algumOk = resultados.some(r => r.status === 200);
-      if (!algumOk) {
-        // prefixo fixo para alerta por match de string no Coolify/Discord
-        console.error('CAPI_FALHOU', JSON.stringify({
-          tx: txId, funil: funnel?.slug || null, resultados,
-        }));
-      }
-      await pool.query(
-        `UPDATE sales SET capi_sent=$1, capi_response=$2 WHERE transaction_id=$3`,
-        [algumOk, JSON.stringify(resultados), txId]
-      );
-    } else if (paid && !sendToMeta) {
-      // venda registrada de proposito sem envio a Meta (upsell/backend)
-      await pool.query(
-        `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
-        ['{"skipped":"produto_nao_envia_meta"}', txId]
-      );
-    } else if (paid && !funnels.length) {
-      // pago mas sem funil resolvido: registra o motivo para diagnóstico
-      await pool.query(
-        `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
-        ['{"skipped":"funnel_nao_resolvido"}', txId]
-      );
-    }
+    await processarVenda(pool, venda);
 
     res.json({ ok: true }); // sempre 200 rápido p/ a PayT não re-tentar à toa
   } catch (e) {
