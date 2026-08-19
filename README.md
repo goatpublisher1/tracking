@@ -26,6 +26,17 @@ pré-deploy no topo do `HANDOFF.md` (`pg_dump --schema-only` das 6 tabelas:
 gerado e commitado, recria-se do zero com:
 `psql "$DATABASE_URL" -f schema.sql`
 
+## Consultar o banco de dentro do container
+
+A imagem nao traz `psql`. Para rodar SQL no terminal do Coolify:
+
+```bash
+node scripts/q.js "SELECT slug, domain, funil, sigla FROM funnels WHERE active ORDER BY id"
+```
+
+`SELECT` imprime tabela; `INSERT`/`UPDATE`/`ALTER` imprime quantas linhas
+foram afetadas — confira esse numero antes de considerar uma escrita feita.
+
 ## Testes
 `npm test` (node:test, sem dependências). `./test/sql.test.sh` exige um Postgres
 com o schema aplicado a partir de `schema.sql` — como esse arquivo ainda não
