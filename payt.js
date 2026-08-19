@@ -42,7 +42,9 @@ function normalizarPayt(payload) {
   // O OR e deliberado: (A || B) === 'paid' NAO e equivalente e mudaria o
   // comportamento quando payment_status vem preenchido mas diferente de 'paid'.
   const paid = p?.transaction?.payment_status === 'paid' || p?.status === 'paid';
-  const status = p?.transaction?.payment_status || p?.status || null;
+  // sem || null no final: a posicao 5 do INSERT original nao tinha esse
+  // fallback, e string vazia/0/false em p.status precisa sobreviver intacto.
+  const status = p?.transaction?.payment_status || p?.status;
 
   // value = comissao do PRODUTOR (busca por type, nao indice fixo)
   const producerComm = Array.isArray(p?.commission)
@@ -60,7 +62,11 @@ function normalizarPayt(payload) {
     status,
     paid,
     teste: false,                                   // a PayT nao marca teste no payload
-    value: Number.isFinite(value) ? value : 0,
+    // sem guard de NaN: o handler original tambem escrevia NaN quando
+    // commission[].amount nao era numerico. Corrigir isso e um defeito
+    // pre-existente separado, fora do escopo deste refactor (extracao
+    // deve reproduzir o comportamento antigo, nao melhora-lo).
+    value,
     total: Number(p?.transaction?.total_price ?? 0) / 100,  // centavos -> reais
     productCode: p?.product?.code ?? null,
     productName: p?.product?.name ?? null,

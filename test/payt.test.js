@@ -82,3 +82,15 @@ test('campos de transaction usam || como o handler original: string vazia vira n
   assert.strictEqual(v.paidAt, null);
   assert.strictEqual(v.upsellFrom, null);
 });
+
+test('status preserva valor falsy definido, como o argumento do INSERT original', () => {
+  assert.strictEqual(normalizarPayt({ status: '' }).status, '');
+  assert.strictEqual(normalizarPayt({ transaction: { payment_status: '' }, status: '' }).status, '');
+  // ausencia total continua caindo em undefined, nao em null
+  assert.strictEqual(normalizarPayt({}).status, undefined);
+});
+
+test('value reproduz NaN do handler original para commission nao numerica', () => {
+  const v = normalizarPayt({ commission: [{ type: 'producer', amount: 'abc' }] });
+  assert.ok(Number.isNaN(v.value), 'esperado NaN, veio ' + v.value);
+});
