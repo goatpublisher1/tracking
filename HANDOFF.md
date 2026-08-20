@@ -484,6 +484,38 @@ Se `funnel_id` vier nulo, o `custom` não chegou — confira o link do botão. S
 
 ## Pendências conhecidas
 
+### `sales.value` pode conter `NaN` (defeito pré-existente, anterior a esta branch)
+
+Quando `commission[].amount` da PayT não é numérico, `Number('abc')/100` produz
+`NaN`, e a coluna `value` é `numeric`, tipo que **aceita** `NaN` em vez de
+rejeitar. A extração das Tasks 1-4 preservou esse comportamento de propósito:
+corrigi-lo junto ao refactor tornaria impossível distinguir "a receita mudou por
+causa da extração" de "mudou por causa do fix", num caminho que fatura de
+verdade.
+
+Por que merece correção própria, e não é cosmético: o `ON CONFLICT` usa
+`GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0))`, e `NaN` ordena
+acima de qualquer número em `numeric` no Postgres. Ou seja, **nenhum webhook
+posterior consegue consertar a linha**, e qualquer `SUM(value)` do painel volta
+`NaN`.
+
+Atenuantes: `capi.js` faz `Number(sale.value) || 0`, então a Meta recebe 0 e não
+`NaN`; e `VENDA_SEM_COMISSAO` dispara (`!(NaN > 0)` é `true`), então existe sinal
+no log.
+
+Verificar se já aconteceu:
+
+```bash
+node scripts/q.js "SELECT count(*) FROM sales WHERE value::text = 'NaN'"
+```
+
+Se houver linhas, limpar e corrigir a origem em `payt.js` num commit próprio:
+
+```bash
+node scripts/q.js "UPDATE sales SET value = NULL WHERE value::text = 'NaN'"
+```
+
+
 Achados menores da revisão final, deferidos de propósito. `.superpowers/` (onde ficava o histórico completo de decisões) não vai para o repo — este é o registro que sobrevive ao clone.
 
 - **Allowlist de CORS cobre só `https://` + `www.` + `track.` de cada domínio** — não `http://`, não portas, não um subdomínio de checkout arbitrário. **Resolva isto antes de ligar `CORS_ALLOWLIST_ENFORCE`**, usando os logs de `CORS_ORIGEM_NEGADA` para achar o que falta.
