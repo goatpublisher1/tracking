@@ -2,18 +2,23 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
-2. **Gerar e configurar o token do webhook.** Isto está ausente do handoff até agora, e sem ele o critério de liberação do Task 5 nunca pode ser cumprido — o gate fica no ar mas o token nunca é validado de verdade. Gere com:
+1. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
    ```bash
-   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
    ```
-   Configure o valor gerado como `PAYT_WEBHOOK_TOKEN` no Coolify, e troque a URL do webhook cadastrada no painel da PayT. O código aceita o token de duas formas: header `x-payt-token` (preferido — não vaza em log de acesso de proxy) ou `?t=<TOKEN>` na query string.
-3. **Conferir os produtos cadastrados.**
+   Confira:
+   ```bash
+   node scripts/q.js "SELECT plataforma, count(*) FROM sales GROUP BY 1"
+   ```
+   Esperado: uma linha, `payt`, com o total de vendas.
+2. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
+3. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
+4. **Conferir os produtos cadastrados.**
    ```sql
    SELECT product_code, offer_type, send_to_meta, active FROM products ORDER BY funnel_slug;
    ```
    Confirme que todo upsell está marcado corretamente — a partir do `event_id` por transação (Task 6), upsells deixam de colidir com a venda principal e passam a ser enviados à Meta individualmente, então um `send_to_meta` errado aqui agora tem efeito imediato.
-4. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
+5. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
 
 Feito isso: suba a branch com **`PAYT_AUTH_ENFORCE` e `CORS_ALLOWLIST_ENFORCE` ambos ausentes/desligados**. Os dois entram em modo shadow (só logam) até os critérios de liberação das seções Task 5 e Task 10 serem cumpridos.
 
@@ -386,21 +391,11 @@ Retornou `up to date` sem nenhuma resolução pendente — o `npm ci` do Dockerf
 
 ## Digistore24 — coluna `plataforma`
 
-`vendas.js` agora grava `plataforma` (`venda.origem`) em cada `INSERT` de `sales` — hoje sempre `'payt'`, e passará a valer `'digistore24'` quando o normalizador da Digistore24 entrar (task futura). A coluna é puramente aditiva, sem constraint, e o código anterior a este commit ignorava qualquer coluna extra — não há janela de incompatibilidade entre rodar o `ALTER TABLE` e subir o deploy.
+`vendas.js` agora grava `plataforma` (`venda.origem`) em cada `INSERT` de `sales` — `'payt'` ou `'digistore24'` conforme a origem da venda (o normalizador da Digistore24, `digistore24.js`, já está implementado e commitado nesta branch — não é mais tarefa futura). A coluna é `NOT NULL DEFAULT 'payt'` — não é puramente aditiva, mas o `DEFAULT` cobre exatamente esse caso: linhas existentes recebem `'payt'` automaticamente, sem exigir backfill manual.
 
-**Rodar antes do deploy**, num ambiente com acesso à produção (este ambiente de desenvolvimento não tem):
+A janela de incompatibilidade existe, e é de mão única: rodar o `ALTER TABLE` antes do deploy é seguro (o código hoje em produção ignora coluna que não conhece, e o `DEFAULT` preenche o que já existe). Subir o deploy antes do `ALTER TABLE` derruba 100% das vendas — das duas plataformas, não só Digistore24 — porque todo `INSERT` em `sales` passa a referenciar `plataforma` e falha com `column "plataforma" of relation "sales" does not exist`; a exception cai no catch do webhook (responde 200), e a venda some sem retry e sem rastro.
 
-```bash
-node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
-```
-
-Confira:
-
-```bash
-node scripts/q.js "SELECT plataforma, count(*) FROM sales GROUP BY 1"
-```
-
-Esperado: uma linha, `payt`, com o total de vendas.
+**Por isso o `ALTER TABLE` e sua verificação agora são o item 1 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
 
 ### Rollback
 
@@ -442,7 +437,28 @@ Confira:
 node scripts/q.js "SELECT product_code, funnel_slug, offer_type, send_to_meta FROM products WHERE product_code LIKE 'ds24_%' ORDER BY funnel_slug"
 ```
 
-**Limite de 63 caracteres no `custom`:** os `sck` no formato `idx_...` têm ~22 e cabem; um formato mais longo seria truncado em silêncio e quebraria a atribuição sem erro visível.
+**Step 3: Configurar o `custom` no botão de compra**
+
+Edite o botão de compra da página de vendas para que a URL do formulário de pedido da Digistore24 carregue `?custom=<sck>`, com o `sck` no formato `idx_...` (o mesmo gerado pelo tracking no `/collect`).
+
+**Limite de 63 caracteres no `custom`:** os `sck` no formato `idx_...` têm ~22 e cabem; `custom` é `string(63)` na Digistore24, e um valor mais longo é truncado em silêncio, sem erro visível, quebrando a atribuição.
+
+Sem este passo, toda venda da Digistore24 cai no fallback por `product_code`, e `sales.sck`/`city`/`state`/`country` e `store.fbp`/`fbc`/`user_agent` ficam nulos — o Purchase chega à Meta só com email e telefone.
+
+Verifique lendo o log `DIGISTORE_IPN` da primeira venda de teste e confirmando que `custom` chegou preenchido.
+
+**Antes da primeira venda real**, confira também:
+
+```sql
+SELECT column_name, data_type FROM information_schema.columns
+WHERE table_name='sales' AND column_name='upsell_from';
+```
+Esperado: tipo texto. `normalizarDigistore` grava ali o `order_id` alfanumérico da Digistore24 (ex.: `'34DEFS45DE2'`) — se a coluna fosse numérica o `INSERT` lançaria, o catch responderia `OK`, e a venda sumiria sem retry.
+
+```sql
+SELECT slug, currency FROM funnels WHERE slug IN ('NOVO-SLUG');
+```
+Confirme a moeda dos funis da Digistore24 cadastrados no Step 1 — `vendas.js` e `capi.js` usam a `currency` do funil, e `normalizarDigistore` ignora o campo `currency` do IPN.
 
 **Step 4: Verificar a primeira venda real**
 
@@ -459,7 +475,10 @@ Se `funnel_id` vier nulo, o `custom` não chegou — confira o link do botão. S
 1. Definir `DIGISTORE_IPN_PASSPHRASE` no Coolify com a passphrase da conta Digistore24 (`Settings → IPN`).
 2. Cadastrar a URL do IPN na Digistore24: `https://track.<dominio>/webhook/digistore24`.
 3. Subir com `DIGISTORE_AUTH_ENFORCE` **ausente**.
-4. **Confirmar o token de resposta:** disparar um IPN de teste e conferir em `Settings → IPN → Reports` se a chamada aparece como sucesso. Se aparecer como falha, o corpo esperado não é `OK` — ajustar `res.send()` conforme o que o log indicar.
+4. **Confirmar o token de resposta:** disparar um IPN de teste e conferir em `Settings → IPN → Reports` se a chamada aparece como sucesso. Se aparecer como falha, o corpo esperado não é `OK` — ajustar `res.send()` conforme o que o log indicar. **Depois do IPN de teste, apague a linha gravada:** o `INSERT` em `vendas.js` acontece antes da checagem de `venda.teste`, então o IPN de teste grava uma linha com aparência real, inclusive `value` preenchido.
+   ```sql
+   DELETE FROM sales WHERE plataforma='digistore24' AND transaction_id='ds24_<tx do teste>';
+   ```
 5. Observar `DIGISTORE_AUTH_NEGADO`. Zero entradas com `tx` preenchido por ~48h cobrindo vendas reais → ligar `DIGISTORE_AUTH_ENFORCE=1` + restart.
 6. Rollback: `DIGISTORE_AUTH_ENFORCE=0` + restart.
 
@@ -470,5 +489,6 @@ Achados menores da revisão final, deferidos de propósito. `.superpowers/` (ond
 - **Allowlist de CORS cobre só `https://` + `www.` + `track.` de cada domínio** — não `http://`, não portas, não um subdomínio de checkout arbitrário. **Resolva isto antes de ligar `CORS_ALLOWLIST_ENFORCE`**, usando os logs de `CORS_ORIGEM_NEGADA` para achar o que falta.
 - `sales` não tem `customer_name` — eventos reprocessados chegam à Meta sem `fn`/`ln`, com qualidade de correspondência pior que a de um evento normal do webhook.
 - `VENDA_SEM_COMISSAO` loga `p.commission` cru — revise antes de configurar retenção de log longa (o log `PAYT_WEBHOOK` grava o payload inteiro de qualquer forma, e é o problema de PII maior dos dois).
+- `console.log('DIGISTORE_IPN', ...)` grava até 2000 caracteres do payload bruto do IPN, incluindo email, nome e telefone do comprador — mesma exposição de PII já listada acima para `PAYT_WEBHOOK`, nunca espelhada para a Digistore24. Revise junto do mesmo item de retenção de log.
 - O script de reprocessamento não grava em `event_log` — reenvios não têm a paridade de auditoria que o webhook tem.
 - `normPais` reconhece `br`/`brasil`/`brazil` e passa através de qualquer código de 2 letras (ISO alpha-2); `normTelefone` prefixa `55` em qualquer número de 10–11 dígitos. Adequado para uma operação só-Brasil; os dois descartam ou forçam em vez de mandar um hash que nunca vai casar.

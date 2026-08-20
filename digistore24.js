@@ -57,6 +57,8 @@ function normalizarDigistore(params) {
     txId: txBruto ? PREFIXO + txBruto : null,
     txIdBruto: txBruto,
     sck: p.custom || null,
+    // sid1 e do postback S2S de afiliado, nao existe no IPN de venda -> src
+    // fica sempre null nesta plataforma (nao e bug, nao precisa investigar).
     src: p.sid1 || null,
     status: p.transaction_type || p.billing_status || null,
     // transaction_type: payment | refund | chargeback
@@ -68,6 +70,9 @@ function normalizarDigistore(params) {
     productName: p.product_name || null,
     email: p.buyer_email || null,
     phone: p.address_phone_no || null,
+    city: p.address_city || null,
+    state: p.address_state || null,
+    country: p.address_country || null,
     nome,
     paymentMethod: p.pay_method || null,
     paidAt: p.transaction_processed_at || null,

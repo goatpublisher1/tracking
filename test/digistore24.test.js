@@ -112,6 +112,13 @@ test('junta nome e endereco', () => {
   assert.strictEqual(v.phone, '11988887777');
 });
 
+test('mapeia city/state/country dos campos address_*', () => {
+  const v = normalizarDigistore(IPN);
+  assert.strictEqual(v.city, 'Sao Paulo');
+  assert.strictEqual(v.state, 'SP');
+  assert.strictEqual(v.country, 'BR');
+});
+
 test('origem e digistore24 e nao ha pixelId', () => {
   const v = normalizarDigistore(IPN);
   assert.strictEqual(v.origem, 'digistore24');

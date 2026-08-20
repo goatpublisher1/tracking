@@ -1,8 +1,9 @@
 // =====================================================================
 //  server.js — Serviço de eventos (substitui GTM + Stape)
 //  Rotas:
-//    POST /collect        <- página Atomicat grava dados no checkout (store)
-//    POST /webhook/payt   <- webhook de venda da PayT (lookup + CAPI)
+//    POST /collect              <- página Atomicat grava dados no checkout (store)
+//    POST /webhook/payt         <- webhook de venda da PayT (lookup + CAPI)
+//    POST /webhook/digistore24  <- IPN de venda da Digistore24 (lookup + CAPI)
 //    GET  /health
 //  Multi-funil: o funil é resolvido pelo domínio de origem OU pelo slug.
 // =====================================================================
@@ -276,6 +277,15 @@ app.post('/webhook/digistore24', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// Falhas do body-parser (charset invalido, corpo > limite, JSON malformado)
+// acontecem ANTES do handler, entao o try/catch das rotas nao as ve. Sem este
+// middleware o Express responde HTML 4xx — e a Digistore24 reentrega ate 20
+// vezes em 10 dias, exatamente a retry storm que o 'OK' existe para evitar.
+app.use((err, req, res, _next) => {
+  console.error('BODY_PARSE_ERRO', req.path, String(err).slice(0, 200));
+  if (req.path === '/webhook/digistore24') return res.send('OK');
+  res.status(200).json({ ok: false });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('tracking service on :' + PORT));

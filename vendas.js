@@ -97,7 +97,8 @@ async function processarVenda(pool, venda) {
      click?.utm_source, click?.utm_campaign, click?.campaign_id,
      click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType,
      venda.paymentMethod, venda.paidAt, venda.upsellFrom,
-     (store?.city || null), (store?.state || null), (store?.country || null),
+     (store?.city || venda.city || null), (store?.state || venda.state || null),
+     (store?.country || venda.country || null),
      (venda.ip || store?.ip_override || null), venda.origem]
   );
 
