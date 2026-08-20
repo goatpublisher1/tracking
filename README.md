@@ -7,6 +7,7 @@ domínio dela.
 ## Rotas
 - `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`)
 - `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase
+- `POST /webhook/digistore24` — IPN de venda da Digistore24
 - `GET /health`
 
 ## Variáveis de ambiente
@@ -15,6 +16,8 @@ domínio dela.
 | `DATABASE_URL` | sim | Postgres |
 | `PAYT_INTEGRATION_KEY` | sim | Chave de integração da conta PayT (painel da PayT). O webhook valida o campo `integration_key` do payload contra ela. Nada a configurar na PayT. |
 | `PAYT_AUTH_ENFORCE` | não | `1` rejeita webhook sem token (401). Ausente = só loga. Kill switch. |
+| `DIGISTORE_IPN_PASSPHRASE` | sim (se usar Digistore24) | Passphrase de IPN configurada na conta Digistore24. O webhook valida a assinatura `sha_sign` do payload contra ela. |
+| `DIGISTORE_AUTH_ENFORCE` | não | `1` rejeita IPN com assinatura inválida (401). Ausente = só loga. Kill switch. |
 | `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`. Ausente = origem ainda refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
 | `PORT` | não | Padrão 3000 |
 
@@ -58,3 +61,9 @@ Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
   Confirme se o domínio está cadastrado e ativo em `funnels.domain`; se
   `CORS_ALLOWLIST_ENFORCE=1` estiver causando falso positivo, desligue a
   variável (kill switch) e reinicie.
+- **Vendas da Digistore24 pararam de aparecer:** cheque `DIGISTORE_AUTH_NEGADO`
+  nos logs. Se houver entradas com `tx` preenchido, desligue
+  `DIGISTORE_AUTH_ENFORCE` e verifique a passphrase configurada.
+- **IPN da Digistore24 sem `transaction_id`:** procure `DIGISTORE_SEM_TXID`.
+- **IPN pago sem valor:** procure `DIGISTORE_SEM_VALOR`.
+- **Novo tipo de transação da Digistore24:** procure `DIGISTORE_STATUS_DESCONHECIDO`.

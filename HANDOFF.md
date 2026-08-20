@@ -408,6 +408,15 @@ Esperado: uma linha, `payt`, com o total de vendas.
 ALTER TABLE sales DROP COLUMN plataforma
 ```
 
+## Digistore24 — configuração
+
+1. Definir `DIGISTORE_IPN_PASSPHRASE` no Coolify com a passphrase da conta Digistore24 (`Settings → IPN`).
+2. Cadastrar a URL do IPN na Digistore24: `https://track.<dominio>/webhook/digistore24`.
+3. Subir com `DIGISTORE_AUTH_ENFORCE` **ausente**.
+4. **Confirmar o token de resposta:** disparar um IPN de teste e conferir em `Settings → IPN → Reports` se a chamada aparece como sucesso. Se aparecer como falha, o corpo esperado não é `OK` — ajustar `res.send()` conforme o que o log indicar.
+5. Observar `DIGISTORE_AUTH_NEGADO`. Zero entradas com `tx` preenchido por ~48h cobrindo vendas reais → ligar `DIGISTORE_AUTH_ENFORCE=1` + restart.
+6. Rollback: `DIGISTORE_AUTH_ENFORCE=0` + restart.
+
 ## Pendências conhecidas
 
 Achados menores da revisão final, deferidos de propósito. `.superpowers/` (onde ficava o histórico completo de decisões) não vai para o repo — este é o registro que sobrevive ao clone.

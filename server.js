@@ -13,6 +13,7 @@ const { sendPurchase } = require('./capi');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
 const { processarVenda } = require('./vendas');
+const { assinaturaValida, normalizarDigistore } = require('./digistore24');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // Um client ocioso que recebe erro do backend (restart do Postgres, failover,
@@ -215,6 +216,61 @@ app.post('/webhook/payt', async (req, res) => {
   } catch (e) {
     console.error('payt webhook error', e);
     res.status(200).json({ ok: false }); // 200 mesmo em erro evita retry storm
+  }
+});
+
+// ---------------------------------------------------------------------
+//  /webhook/digistore24 — IPN da Digistore24.
+//  Diferencas em relacao a PayT, ambas deliberadas:
+//   - autentica por assinatura SHA-512 do payload, nao por chave estatica;
+//   - responde texto puro, nao JSON: a Digistore24 so considera a chamada
+//     bem-sucedida se receber o token esperado, e reenvia ate 20 vezes ao
+//     longo de 10 dias quando falha.
+// ---------------------------------------------------------------------
+app.post('/webhook/digistore24', async (req, res) => {
+  try {
+    const p = req.body || {};
+
+    const ok = assinaturaValida(p, process.env.DIGISTORE_IPN_PASSPHRASE);
+    if (!ok) {
+      console.warn('DIGISTORE_AUTH_NEGADO', JSON.stringify({
+        ip: req.ip,
+        presente: !!(p && p.sha_sign),
+        tx: (p && p.transaction_id) || null,
+        teste: p && p.api_mode === 'test',
+      }));
+      if (process.env.DIGISTORE_AUTH_ENFORCE === '1') return res.sendStatus(401);
+    }
+
+    // LOG TEMPORARIO: descobrir o formato real do IPN em producao.
+    try { console.log('DIGISTORE_IPN', JSON.stringify(p).slice(0, 2000)); } catch (e) {}
+
+    const venda = normalizarDigistore(p);
+
+    const CONHECIDOS = ['payment', 'refund', 'chargeback'];
+    if (venda.status && !CONHECIDOS.includes(venda.status)) {
+      console.warn('DIGISTORE_STATUS_DESCONHECIDO', venda.status, venda.txIdBruto);
+    }
+
+    if (!venda.txId) {
+      console.error('DIGISTORE_SEM_TXID', JSON.stringify(p).slice(0, 500));
+      return res.send('OK');
+    }
+
+    if (venda.paid && !(venda.value > 0)) {
+      console.error('DIGISTORE_SEM_VALOR', JSON.stringify({
+        tx: venda.txIdBruto, amount_vendor: p.amount_vendor,
+      }));
+    }
+
+    await processarVenda(pool, venda);
+
+    res.send('OK');
+  } catch (e) {
+    console.error('digistore24 webhook error', e);
+    // mesmo em erro interno respondemos OK: a alternativa e a Digistore24
+    // reenviar 20 vezes o mesmo payload que ja falhou. A falha fica no log.
+    res.send('OK');
   }
 });
 
