@@ -410,6 +410,52 @@ ALTER TABLE sales DROP COLUMN plataforma
 
 ## Digistore24 — configuração
 
+### Cadastro de funis e produtos
+
+**Step 1: Cadastrar os funis**
+
+Para cada funil novo, com o domínio de tracking, o pixel e o token da conta de anúncios:
+
+```bash
+node scripts/q.js "INSERT INTO funnels (slug, domain, pixel_id, capi_token, currency, active, funil, sigla) VALUES ('NOVO-SLUG','www.NOVODOMINIO','PIXEL_ID','CAPI_TOKEN','BRL',true,'NOME DO FUNIL','SIGLA')"
+```
+
+Confira:
+
+```bash
+node scripts/q.js "SELECT id, slug, sigla, domain, pixel_id, capi_token IS NOT NULL AS tem_token, active FROM funnels ORDER BY id"
+```
+
+**Step 2: Cadastrar os produtos com o prefixo**
+
+O `product_id` da Digistore24 entra prefixado com `ds24_`, igual ao que o normalizador produz:
+
+```bash
+node scripts/q.js "INSERT INTO products (product_code, funnel_slug, offer_type, send_to_meta, active) VALUES ('ds24_122343','NOVO-SLUG','principal',true,true)"
+```
+
+Marque cada upsell com `send_to_meta=false`, como nos funis da PayT. Isso importa mais aqui: o `custom` é a única fonte de `sck` na Digistore24, então o `product_code` é a única rede de segurança quando o click id não volta.
+
+Confira:
+
+```bash
+node scripts/q.js "SELECT product_code, funnel_slug, offer_type, send_to_meta FROM products WHERE product_code LIKE 'ds24_%' ORDER BY funnel_slug"
+```
+
+**Limite de 63 caracteres no `custom`:** os `sck` no formato `idx_...` têm ~22 e cabem; um formato mais longo seria truncado em silêncio e quebraria a atribuição sem erro visível.
+
+**Step 4: Verificar a primeira venda real**
+
+```bash
+node scripts/q.js "SELECT transaction_id, plataforma, status, value, funnel_id, capi_sent FROM sales WHERE plataforma='digistore24' ORDER BY created_at DESC LIMIT 5"
+```
+
+Esperado numa venda paga: `plataforma='digistore24'`, `value` igual ao `amount_vendor` do relatório da Digistore24, `funnel_id` preenchido, `capi_sent=true`.
+
+Se `funnel_id` vier nulo, o `custom` não chegou — confira o link do botão. Se `capi_sent` for falso, procure `CAPI_FALHOU` nos logs.
+
+### Implantação e autenticação
+
 1. Definir `DIGISTORE_IPN_PASSPHRASE` no Coolify com a passphrase da conta Digistore24 (`Settings → IPN`).
 2. Cadastrar a URL do IPN na Digistore24: `https://track.<dominio>/webhook/digistore24`.
 3. Subir com `DIGISTORE_AUTH_ENFORCE` **ausente**.
