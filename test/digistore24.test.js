@@ -100,6 +100,43 @@ test('paid so em transaction_type payment', () => {
   assert.strictEqual(normalizarDigistore({ ...IPN, transaction_type: 'chargeback' }).paid, false);
 });
 
+// A Digistore24 manda o tipo com inicial maiuscula. O fixture acima usa minuscula, que era a
+// suposicao errada — a primeira venda real chegou como 'Payment', gravou status cru, nao bateu
+// com o filtro de venda paga do dashboard, e deixou paid false, o que impediu o Purchase de ir
+// para a Meta. Estes testes travam a caixa e a traducao.
+test('transaction_type com inicial maiuscula e tratado igual', () => {
+  assert.strictEqual(normalizarDigistore({ ...IPN, transaction_type: 'Payment' }).paid, true);
+  assert.strictEqual(normalizarDigistore({ ...IPN, transaction_type: 'Payment' }).status, 'paid');
+  assert.strictEqual(normalizarDigistore({ ...IPN, transaction_type: 'REFUND' }).status, 'refunded');
+  assert.strictEqual(normalizarDigistore({ ...IPN, transaction_type: ' Chargeback ' }).status, 'chargeback');
+});
+
+test('status sai no vocabulario da PayT, nao no da Digistore24', () => {
+  assert.strictEqual(normalizarDigistore(IPN).status, 'paid', 'payment vira paid, senao o dashboard nao conta a venda');
+  assert.strictEqual(normalizarDigistore({ ...IPN, transaction_type: 'refund' }).status, 'refunded');
+});
+
+test('sem transaction_type cai no billing_status, tambem traduzido', () => {
+  const semTipo = { ...IPN };
+  delete semTipo.transaction_type;
+  assert.strictEqual(normalizarDigistore(semTipo).status, 'paid', 'billing_status completed e venda paga');
+  assert.strictEqual(normalizarDigistore(semTipo).paid, true);
+});
+
+test('estado desconhecido sai em minusculas e nao vira paid', () => {
+  const r = normalizarDigistore({ ...IPN, transaction_type: 'Estorno_Parcial' });
+  assert.strictEqual(r.status, 'estorno_parcial', 'preserva a evidencia do que chegou');
+  assert.strictEqual(r.paid, false, 'nao inventar pagamento a partir de estado que nao sei ler');
+});
+
+test('sem transaction_type e sem billing_status o status e null', () => {
+  const vazio = { ...IPN };
+  delete vazio.transaction_type;
+  delete vazio.billing_status;
+  assert.strictEqual(normalizarDigistore(vazio).status, null);
+  assert.strictEqual(normalizarDigistore(vazio).paid, false);
+});
+
 test('teste vem de api_mode', () => {
   assert.strictEqual(normalizarDigistore(IPN).teste, false);
   assert.strictEqual(normalizarDigistore({ ...IPN, api_mode: 'test' }).teste, true);

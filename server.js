@@ -248,7 +248,10 @@ app.post('/webhook/digistore24', async (req, res) => {
 
     const venda = normalizarDigistore(p);
 
-    const CONHECIDOS = ['payment', 'refund', 'chargeback'];
+    // Vocabulario ja traduzido por normalizarDigistore, o mesmo que a PayT grava. O aviso
+    // volta a significar "chegou estado que nao sei traduzir", em vez de disparar no caminho
+    // normal — foi assim que 'Payment' passou batido ate a primeira venda do SWH.
+    const CONHECIDOS = ['paid', 'refunded', 'chargeback', 'pending'];
     if (venda.status && !CONHECIDOS.includes(venda.status)) {
       console.warn('DIGISTORE_STATUS_DESCONHECIDO', venda.status, venda.txIdBruto);
     }

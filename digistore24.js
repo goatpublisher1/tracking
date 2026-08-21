@@ -43,6 +43,29 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// A Digistore24 manda o tipo com inicial maiuscula ("Payment") e num vocabulario proprio;
+// a PayT grava 'paid'/'refunded'. Quem le a tabela `sales` — o dashboard, um relatorio, o
+// proximo gateway — nao pode precisar saber por onde a venda entrou, entao a traducao mora
+// aqui, na fronteira. Sem isto, 'Payment' era gravado cru, nao batia com o filtro de venda
+// paga do dashboard, e `paid` ficava false — o que impedia o Purchase de ir para a Meta.
+const STATUS_DIGISTORE = {
+  payment: 'paid',
+  refund: 'refunded',
+  chargeback: 'chargeback',
+  // billing_status, usado quando o IPN nao traz transaction_type
+  completed: 'paid',
+  pending: 'pending',
+  missed: 'pending',
+};
+
+function traduzirStatus(p) {
+  const bruto = String(p.transaction_type || p.billing_status || '').trim().toLowerCase();
+  if (!bruto) return null;
+  // Valor desconhecido sai como veio, em minusculas: o server avisa no log, e gravar o
+  // original preserva a evidencia de qual estado a Digistore24 mandou.
+  return STATUS_DIGISTORE[bruto] || bruto;
+}
+
 // Os valores da Digistore24 ja vem em unidade monetaria (97.00), nao em
 // centavos como na PayT — por isso nao ha divisao por 100 aqui.
 function normalizarDigistore(params) {
@@ -60,9 +83,8 @@ function normalizarDigistore(params) {
     // sid1 e do postback S2S de afiliado, nao existe no IPN de venda -> src
     // fica sempre null nesta plataforma (nao e bug, nao precisa investigar).
     src: p.sid1 || null,
-    status: p.transaction_type || p.billing_status || null,
-    // transaction_type: payment | refund | chargeback
-    paid: p.transaction_type === 'payment',
+    status: traduzirStatus(p),
+    paid: traduzirStatus(p) === 'paid',
     teste: p.api_mode === 'test',
     value: num(p.amount_vendor),      // a parte do vendedor
     total: num(p.amount_brutto),      // o que o cliente pagou
