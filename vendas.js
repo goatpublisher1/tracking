@@ -60,6 +60,11 @@ async function processarVenda(pool, venda) {
     click = c.rows[0] || null;
   }
 
+  // O IPN da Digistore24 nao tem campo de src (sid1 e do postback de afiliado),
+  // entao venda.src vem null nessa plataforma. O /collect ja gravou store.src a
+  // partir das UTMs da pagina — usar como fallback faz as duas plataformas
+  // gravarem o mesmo conjunto de campos. Nao afeta atribuicao: campaign_id,
+  // adset_id e ad_id vem da tabela clicks e ja chegam preenchidos.
   await pool.query(
     `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
        currency, product_code, product_name, customer_email, customer_phone,
@@ -91,7 +96,7 @@ async function processarVenda(pool, venda) {
        offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
        payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
        paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
-    [txId, 'purchase_' + txId, sck, src, venda.status,
+    [txId, 'purchase_' + txId, sck, (venda.src || store?.src || null), venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,
      click?.utm_source, click?.utm_campaign, click?.campaign_id,
