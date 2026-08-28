@@ -6,7 +6,7 @@
 const { sendPurchase } = require('./capi');
 
 async function processarVenda(pool, venda) {
-  const { txId, sck, src, paid, value, total } = venda;
+  const { txId, sck, paid, value, total } = venda;
 
   // ---- resolucao de funil: pixel -> sck/store -> product_code -> funil unico
   let funnel = null;
@@ -65,6 +65,9 @@ async function processarVenda(pool, venda) {
   // partir das UTMs da pagina — usar como fallback faz as duas plataformas
   // gravarem o mesmo conjunto de campos. Nao afeta atribuicao: campaign_id,
   // adset_id e ad_id vem da tabela clicks e ja chegam preenchidos.
+  // Mesmo fallback vale para event_log.src abaixo — os dois tem que concordar.
+  const srcFinal = venda.src || store?.src || null;
+
   await pool.query(
     `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
        currency, product_code, product_name, customer_email, customer_phone,
@@ -96,7 +99,7 @@ async function processarVenda(pool, venda) {
        offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
        payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
        paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
-    [txId, 'purchase_' + txId, sck, (venda.src || store?.src || null), venda.status,
+    [txId, 'purchase_' + txId, sck, srcFinal, venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,
      click?.utm_source, click?.utm_campaign, click?.campaign_id,
@@ -135,7 +138,7 @@ async function processarVenda(pool, venda) {
         await pool.query(
           `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
            VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
-          ['purchase_' + txId, src, f.id, r.httpStatus, JSON.stringify(r.payload)]);
+          ['purchase_' + txId, srcFinal, f.id, r.httpStatus, JSON.stringify(r.payload)]);
       } catch (err) {
         resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });
       }
