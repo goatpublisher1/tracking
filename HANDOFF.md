@@ -389,6 +389,43 @@ Retornou `up to date` sem nenhuma resolução pendente — o `npm ci` do Dockerf
 
 **Este é o único deploy da branch que muda como as dependências são instaladas — acompanhe de perto.** Se o container não subir, `git revert` deste commit volta ao `npm install` anterior (sem lockfile, sem `USER node`).
 
+## Task 12: Rolling update no Coolify (health check)
+
+O `Dockerfile` agora declara `HEALTHCHECK` em `/health` (ver commit desta task), condição necessária para o Coolify fazer rolling update — subir o container novo, esperar ficar saudável, só então derrubar o antigo. Sem rolling update, todo redeploy (inclusive os que provisionam domínio novo, com `instant_deploy: true`) tem uma janela em que `/webhook/payt` e `/webhook/digistore24` recusam requisição — e nenhuma das duas plataformas re-tenta, então a venda some sem retry e sem rastro. Os passos abaixo são do painel do Coolify e só o dono da conta pode executá-los — não foram (e não podem ser) feitos neste ambiente de desenvolvimento local.
+
+**Risco: ALTO se o passo 1 abaixo for pulado.** O rolling update do Coolify não ativa quando a aplicação tem mapeamento de porta no host — e a falha é silenciosa: o deploy continua funcionando, só que com a mesma janela de downtime de sempre, e ninguém percebe até vendas começarem a sumir.
+
+### 1. Confirmar que não há mapeamento de porta no host
+
+Na aplicação do tracking no Coolify, em **Configuration → General** (ou a aba de rede/portas, dependendo da versão), confirme que só existe **"Ports Exposes"** (`3000`, consistente com o `EXPOSE` do `Dockerfile`) — **não** "Ports Mappings" para o host. Mapeamento de porta no host é o que desativa o rolling update: com ele, o Coolify não consegue rodar o container novo e o antigo ao mesmo tempo na mesma porta, e cai de volta para o modelo de parar-depois-subir. Se houver um mapeamento configurado, remova-o antes de continuar.
+
+### 2. Ligar rolling update
+
+Na configuração da aplicação, habilite rolling update (deployment strategy). Com o `HEALTHCHECK` do `Dockerfile` e sem mapeamento de porta no host (passo 1), as quatro condições do Coolify para rolling update ficam satisfeitas: deployment via Dockerfile (não Compose), nomes de container default, `/health` respondendo 200, e a estratégia ligada aqui.
+
+### 3. Criar um token de API dedicado
+
+Crie um token de API no Coolify com escopo de **escrita e deploy apenas** — nunca um token root/admin. Este token é o que a automação de provisionamento de domínio (Dashboard) usa para criar aplicação/domínio via API; um token root exposto nesse caminho é um raio de explosão muito maior do que o necessário.
+
+### 4. Anotar o UUID da aplicação
+
+Anote o UUID da aplicação do tracking no Coolify (aparece na URL do painel ou via API) e configure-o como `COOLIFY_APP_UUID` no ambiente do Dashboard.
+
+### 5. Validar com um redeploy manual — a prova de que o rolling update está ativo
+
+Este é o passo que confirma que os passos 1–2 funcionaram de verdade, e não apenas que a opção está marcada no painel:
+
+```bash
+while true; do
+  curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" https://track.<dominio>/health
+  sleep 0.5
+done
+```
+
+Deixe esse laço rodando e, em paralelo, dispare um redeploy manual do serviço no painel do Coolify. Acompanhe a saída durante todo o deploy: **nenhuma requisição pode falhar** (nenhum código diferente de `200`, nenhum erro de conexão). Se alguma falhar, o rolling update não está efetivamente ativo — revise o passo 1 (mapeamento de porta é a causa mais comum) antes de considerar a automação de provisionamento segura para rodar em produção.
+
+Sem este passo, "o rolling update está ligado" é suposição, não fato verificado.
+
 ## Digistore24 — coluna `plataforma`
 
 `vendas.js` agora grava `plataforma` (`venda.origem`) em cada `INSERT` de `sales` — `'payt'` ou `'digistore24'` conforme a origem da venda (o normalizador da Digistore24, `digistore24.js`, já está implementado e commitado nesta branch — não é mais tarefa futura). A coluna é `NOT NULL DEFAULT 'payt'` — não é puramente aditiva, mas o `DEFAULT` cobre exatamente esse caso: linhas existentes recebem `'payt'` automaticamente, sem exigir backfill manual.
