@@ -85,9 +85,9 @@ linhas separadas em `sales.transaction_id`, que é a chave de deduplicação.
 `sck`, `src`, `email`, `phone`, `ip` ficam nulos: o postback não traz nenhum deles, e
 inventar valor a partir de campo parecido é pior que o nulo honesto.
 
-## D. Duas mudanças no núcleo compartilhado
+## D. Três mudanças no núcleo compartilhado
 
-`processarVenda` é usado pelas duas plataformas atuais. As duas mudanças abaixo são
+`processarVenda` é usado pelas duas plataformas atuais. As três mudanças abaixo são
 aditivas — nenhum campo novo presente significa exatamente o comportamento de hoje.
 
 **1. `funnelSlug` como primeiro passo da resolução de funil.** Sem `sck` e sem produto
@@ -98,7 +98,14 @@ um parâmetro fixo na URL é determinístico e não depende de cadastro.
 **2. `enviarMeta: false` respeitado.** Hoje `sendToMeta` nasce `true` e só vira `false` se
 o produto estiver cadastrado com `send_to_meta = false` (`vendas.js:22`). Um produto de
 terceiro nunca estará cadastrado, então sem esta mudança a comissão iria para a Meta e
-poluiria a otimização das nossas campanhas — dinheiro real, silenciosamente.
+poluiria a otimização das nossas campanhas — dinheiro real, silenciosamente. A regra é
+terminal: vale mesmo que alguém cadastre o produto de terceiro com `send_to_meta = true`.
+
+**3. `offerType` da venda como valor inicial.** Hoje `offerType` só é preenchido a partir
+do produto cadastrado. Sem produto, gravaria nulo — e a query de receita do dashboard usa
+`offer_type = 'principal'` e `offer_type <> 'principal'`, que com nulo não é verdadeiro em
+nenhum dos dois. A comissão entraria na receita total e sumiria das duas quebras. O produto
+cadastrado, quando existe, continua vencendo.
 
 ## E. Dashboard
 
