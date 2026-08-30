@@ -4,6 +4,7 @@
 //    POST /collect              <- página Atomicat grava dados no checkout (store)
 //    POST /webhook/payt         <- webhook de venda da PayT (lookup + CAPI)
 //    POST /webhook/digistore24  <- IPN de venda da Digistore24 (lookup + CAPI)
+//    GET  /webhook/digistore24-afiliado <- postback S2S de afiliado (comissao)
 //    GET  /health
 //  Multi-funil: o funil é resolvido pelo domínio de origem OU pelo slug.
 // =====================================================================
@@ -15,6 +16,7 @@ const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
 const { processarVenda } = require('./vendas');
 const { assinaturaValida, normalizarDigistore } = require('./digistore24');
+const { normalizarAfiliado } = require('./digistore24-afiliado');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // Um client ocioso que recebe erro do backend (restart do Postgres, failover,
@@ -274,6 +276,61 @@ app.post('/webhook/digistore24', async (req, res) => {
     console.error('digistore24 webhook error', e);
     // mesmo em erro interno respondemos OK: a alternativa e a Digistore24
     // reenviar 20 vezes o mesmo payload que ja falhou. A falha fica no log.
+    res.send('OK');
+  }
+});
+
+// ---------------------------------------------------------------------
+//  /webhook/digistore24-afiliado — Postback S2S de afiliado.
+//  Canal separado do IPN de venda, com tres diferencas deliberadas:
+//   - GET com query string: e o unico formato que a Digistore24 oferece aqui,
+//     e os nomes dos parametros sao escolha nossa (montamos a URL no painel);
+//   - autentica por token na query: o postback nao assina o payload e nao
+//     aceita header. Token errado devolve 401 de proposito, para disparar o
+//     e-mail de notificacao de erro configurado na conexao;
+//   - a venda nunca vai para a Meta (enviarMeta: false no normalizador).
+// ---------------------------------------------------------------------
+app.get('/webhook/digistore24-afiliado', async (req, res) => {
+  try {
+    const q = req.query || {};
+
+    if (!tokenValido(String(q.token || ''), process.env.DIGISTORE_AFILIADO_TOKEN || '')) {
+      console.warn('AFILIADO_AUTH_NEGADO', JSON.stringify({
+        ip: req.ip, presente: !!q.token, tx: q.transactionId || null,
+      }));
+      return res.sendStatus(401);
+    }
+
+    const venda = normalizarAfiliado(q);
+
+    if (!venda.funnelSlug) {
+      console.error('AFILIADO_SEM_FUNIL', JSON.stringify({ tx: venda.txIdBruto }));
+      return res.send('OK');
+    }
+
+    if (!venda.txId) {
+      console.error('AFILIADO_SEM_TXID', JSON.stringify(q).slice(0, 500));
+      return res.send('OK');
+    }
+
+    const CONHECIDOS = ['paid', 'refunded', 'chargeback', 'pending'];
+    if (venda.status && !CONHECIDOS.includes(venda.status)) {
+      console.warn('AFILIADO_STATUS_DESCONHECIDO', venda.status, venda.txIdBruto);
+    }
+
+    if (venda.paid && !(venda.value > 0)) {
+      console.error('AFILIADO_SEM_VALOR', JSON.stringify({
+        tx: venda.txIdBruto, commission: q.commission,
+      }));
+    }
+
+    await processarVenda(pool, venda);
+
+    res.send('OK');
+  } catch (e) {
+    console.error('afiliado webhook error', e);
+    // mesmo em erro interno respondemos OK, como nas outras rotas de webhook:
+    // a alternativa e a Digistore24 reenviar o mesmo postback que ja falhou.
     res.send('OK');
   }
 });
