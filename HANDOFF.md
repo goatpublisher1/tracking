@@ -519,6 +519,27 @@ Se `funnel_id` vier nulo, o `custom` não chegou — confira o link do botão. S
 5. Observar `DIGISTORE_AUTH_NEGADO`. Zero entradas com `tx` preenchido por ~48h cobrindo vendas reais → ligar `DIGISTORE_AUTH_ENFORCE=1` + restart.
 6. Rollback: `DIGISTORE_AUTH_ENFORCE=0` + restart.
 
+### Canal de afiliado — postback S2S (`/webhook/digistore24-afiliado`)
+
+Canal separado do IPN de venda documentado acima: é o postback da conta de afiliado, dispara nas vendas dos nossos links em produto de terceiro, e nunca vai para a Meta (`normalizarAfiliado` grava `enviarMeta: false`, `offer_type = 'backend'`).
+
+1. **A variável.** `DIGISTORE_AFILIADO_TOKEN` no serviço de tracking no Coolify, com *Available at Runtime* marcado. Gere o valor no terminal e cole direto no campo, sem passar por lugar nenhum:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+2. **A URL do postback**, para colar em Digistore24 › Conexão: Postback S2S. Os nomes à esquerda de cada `=` são escolha nossa e têm que casar com o que `normalizarAfiliado` lê — não altere:
+   ```
+   https://track.chemistrysystem.com/webhook/digistore24-afiliado?funil=chemistrysystem-fb1&transactionId={transaction_id}&orderId={order_id}&transactionType={transaction_type}&status={billing_status}&currency={currency}&productId={product_id}&productName={product_name}&commission={amount_affiliate_abs}&amountGross={amount_brutto_abs}&country={country}&dateTime={datetime_full}&isTest={is_test}&token=SEU_TOKEN
+   ```
+   `SEU_TOKEN` no fim é o valor gerado no passo 1. Na conexão, deixe *Moeda* em "Converter valores para USD" — é a moeda do funil SWH, e `processarVenda` grava `funnel.currency` sem converter nada.
+3. **Como conferir.** O botão *Testar conexão* do painel da Digistore24 dispara um postback com `isTest=1`. Depois dele:
+   ```bash
+   node scripts/q.js "SELECT transaction_id, status, value, funnel_id, offer_type, plataforma FROM sales WHERE plataforma = 'digistore24_afiliado' ORDER BY id DESC LIMIT 5"
+   ```
+   Esperado: uma linha com `plataforma = digistore24_afiliado`, `funnel_id` igual ao do SWH e `offer_type = backend`. Venda de teste grava `capi_response = {"skipped":"modo_teste"}` e não vai para a Meta.
+4. **O que registrar como aceito:** o token viaja na query string e aparece em log de acesso do proxy. É o único formato que a Digistore24 oferece neste canal. Rotacionar é trocar a variável e a URL.
+5. **O que não fazer:** não cadastrar os produtos da parceria no dashboard. Eles são de terceiro, o `send_to_meta` deles não seria respeitado como salvaguarda (a rota já força), e o cadastro só criaria a impressão de que o IPN de venda está apontado para nós — não está.
+
 ## Pendências conhecidas
 
 ### `sales.value` pode conter `NaN` (defeito pré-existente, anterior a esta branch)
