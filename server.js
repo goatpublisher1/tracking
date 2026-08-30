@@ -326,7 +326,17 @@ app.get('/webhook/digistore24-afiliado', async (req, res) => {
       }));
     }
 
-    await processarVenda(pool, venda);
+    const resultado = await processarVenda(pool, venda);
+
+    // funil presente na URL mas sem match ativo: mesmo sintoma do SEM_FUNIL
+    // acima (funnel_id nulo, some do dashboard), so que so aparece aqui porque
+    // processarVenda ja tentou e nao achou. Nao mexe na resolucao em vendas.js,
+    // so olha o motivo que ela ja devolve.
+    if (venda.paid && resultado.motivo === 'funnel_nao_resolvido') {
+      console.error('AFILIADO_FUNIL_NAO_ENCONTRADO', JSON.stringify({
+        funil: venda.funnelSlug, tx: venda.txIdBruto,
+      }));
+    }
 
     res.send('OK');
   } catch (e) {
