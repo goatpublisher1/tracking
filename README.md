@@ -8,6 +8,7 @@ domínio dela.
 - `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`)
 - `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase
 - `POST /webhook/digistore24` — IPN de venda da Digistore24
+- `GET /webhook/digistore24-afiliado` — postback S2S de comissao de afiliado da Digistore24
 - `GET /health`
 
 ## Variáveis de ambiente
@@ -18,6 +19,7 @@ domínio dela.
 | `PAYT_AUTH_ENFORCE` | não | `1` rejeita webhook sem token (401). Ausente = só loga. Kill switch. |
 | `DIGISTORE_IPN_PASSPHRASE` | sim (se usar Digistore24) | Passphrase de IPN configurada na conta Digistore24. O webhook valida a assinatura `sha_sign` do payload contra ela. |
 | `DIGISTORE_AUTH_ENFORCE` | não | `1` rejeita IPN com assinatura inválida (401). Ausente = só loga. Kill switch. |
+| `DIGISTORE_AFILIADO_TOKEN` | sim (se usar o postback de afiliado) | Token da URL do postback S2S de afiliado (`?token=`), gerado por nós. Token errado devolve 401 sempre — sem kill switch, o postback não assina o payload. |
 | `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`. Ausente = origem ainda refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
 | `PORT` | não | Padrão 3000 |
 
@@ -67,3 +69,13 @@ Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
 - **IPN da Digistore24 sem `transaction_id`:** procure `DIGISTORE_SEM_TXID`.
 - **IPN pago sem valor:** procure `DIGISTORE_SEM_VALOR`.
 - **Novo tipo de transação da Digistore24:** procure `DIGISTORE_STATUS_DESCONHECIDO`.
+- **Comissão de afiliado da Digistore24 recusada:** cheque `AFILIADO_AUTH_NEGADO`
+  nos logs. Confira o `DIGISTORE_AFILIADO_TOKEN` configurado e a URL cadastrada
+  na conexão — este postback não tem kill switch, token errado é sempre 401.
+- **Postback de afiliado sem `funil` na URL:** procure `AFILIADO_SEM_FUNIL`.
+- **Postback de afiliado sem `transactionId`:** procure `AFILIADO_SEM_TXID`.
+- **Comissão de afiliado paga sem valor:** procure `AFILIADO_SEM_VALOR`.
+- **Novo tipo de transação no postback de afiliado:** procure `AFILIADO_STATUS_DESCONHECIDO`.
+- **Slug de funil digitado errado na URL do postback de afiliado:** procure
+  `AFILIADO_FUNIL_NAO_ENCONTRADO` — `funil` presente mas sem funil ativo com
+  esse slug.
