@@ -527,16 +527,20 @@ Canal separado do IPN de venda documentado acima: é o postback da conta de afil
    ```bash
    node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
    ```
-2. **A URL do postback**, para colar em Digistore24 › Conexão: Postback S2S. Os nomes à esquerda de cada `=` são escolha nossa e têm que casar com o que `normalizarAfiliado` lê — não altere:
+   Faça isto **antes** de colar a URL do passo 2 na Digistore24. O postback S2S é fire-and-forget: diferente do IPN, um postback que tomou 401 não é reenviado — a comissão daquela venda não tem como ser recuperada depois. Se a URL for cadastrada antes da variável existir no serviço, toda comissão real que chegar nesse intervalo é perdida, não apenas atrasada.
+2. **A URL do postback**, para colar em Digistore24 › Conexão: Postback S2S. Os nomes à esquerda de cada `=` são escolha nossa e têm que casar com o que `normalizarAfiliado` lê — não altere. `token` e `funil` vêm primeiro de propósito: `productName` é texto livre do vendedor terceiro, e um `#` ou `&` não escapado nesse campo trunca ou quebra o resto da query — se `token` viesse depois, um nome de produto assim geraria 401 silencioso, indistinguível de variável mal configurada:
    ```
-   https://track.chemistrysystem.com/webhook/digistore24-afiliado?funil=chemistrysystem-fb1&transactionId={transaction_id}&orderId={order_id}&transactionType={transaction_type}&status={billing_status}&currency={currency}&productId={product_id}&productName={product_name}&commission={amount_affiliate_abs}&amountGross={amount_brutto_abs}&country={country}&dateTime={datetime_full}&isTest={is_test}&token=SEU_TOKEN
+   https://track.chemistrysystem.com/webhook/digistore24-afiliado?funil=chemistrysystem-fb1&token=SEU_TOKEN&transactionId={transaction_id}&orderId={order_id}&transactionType={transaction_type}&status={billing_status}&currency={currency}&productId={product_id}&productName={product_name}&commission={amount_affiliate_abs}&amountGross={amount_brutto_abs}&country={country}&dateTime={datetime_full}&isTest={is_test}
    ```
-   `SEU_TOKEN` no fim é o valor gerado no passo 1. Na conexão, deixe *Moeda* em "Converter valores para USD" — é a moeda do funil SWH, e `processarVenda` grava `funnel.currency` sem converter nada.
+   `SEU_TOKEN` é o valor gerado no passo 1. Na conexão, deixe *Moeda* em "Converter valores para USD" — é a moeda do funil SWH, e `processarVenda` grava `funnel.currency` sem converter nada.
 3. **Como conferir.** O botão *Testar conexão* do painel da Digistore24 dispara um postback com `isTest=1`. Depois dele:
    ```bash
    node scripts/q.js "SELECT transaction_id, status, value, funnel_id, offer_type, plataforma FROM sales WHERE plataforma = 'digistore24_afiliado' ORDER BY id DESC LIMIT 5"
    ```
-   Esperado: uma linha com `plataforma = digistore24_afiliado`, `funnel_id` igual ao do SWH e `offer_type = backend`. Venda de teste grava `capi_response = {"skipped":"modo_teste"}` e não vai para a Meta.
+   Esperado: uma linha com `plataforma = digistore24_afiliado`, `funnel_id` igual ao do SWH e `offer_type = backend`. Venda de teste grava `capi_response = {"skipped":"modo_teste"}` e não vai para a Meta. **Depois do teste, apague a linha gravada:** o `INSERT` em `vendas.js` acontece antes da checagem de `paid && venda.teste`, então o postback do botão *Testar conexão* grava uma linha com `funnel_id` do funil SWH ao vivo, `offer_type='backend'`, `status='paid'` e valor não-zero — contada na receita do SWH para sempre se não for apagada.
+   ```sql
+   DELETE FROM sales WHERE plataforma='digistore24_afiliado' AND transaction_id='ds24a_<tx do teste>';
+   ```
 4. **O que registrar como aceito:** o token viaja na query string e aparece em log de acesso do proxy. É o único formato que a Digistore24 oferece neste canal. Rotacionar é trocar a variável e a URL.
 5. **O que não fazer:** não cadastrar os produtos da parceria no dashboard. Eles são de terceiro, o `send_to_meta` deles não seria respeitado como salvaguarda (a rota já força), e o cadastro só criaria a impressão de que o IPN de venda está apontado para nós — não está.
 
