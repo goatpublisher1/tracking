@@ -10,7 +10,15 @@ async function processarVenda(pool, venda) {
 
   // ---- resolucao de funil: pixel -> sck/store -> product_code -> funil unico
   let funnel = null;
-  if (venda.pixelId) {
+  // Postback de afiliado: a conexao S2S e dedicada a uma parceria, entao o
+  // funil vem fixo na URL. Sem sck e sem produto cadastrado, nada abaixo
+  // resolveria, e venda com funnel_id nulo e invisivel no dashboard.
+  if (venda.funnelSlug) {
+    const r = await pool.query(
+      'SELECT * FROM funnels WHERE active AND slug = $1 LIMIT 1', [venda.funnelSlug]);
+    funnel = r.rows[0] || null;
+  }
+  if (!funnel && venda.pixelId) {
     const r = await pool.query(
       'SELECT * FROM funnels WHERE active AND pixel_id = $1 LIMIT 1', [venda.pixelId]);
     funnel = r.rows[0] || null;
@@ -22,7 +30,12 @@ async function processarVenda(pool, venda) {
   }
 
   // fallback: pelo product_code — resolve vendas sem sck e classifica a oferta
-  let offerType = null;
+  // O produto cadastrado, quando existe, sobrescreve os dois logo abaixo.
+  // offerType inicial importa para a venda de afiliado: sem ele o offer_type
+  // grava null, e a query de receita do dashboard usa `= 'principal'` e
+  // `<> 'principal'` — com null nenhuma das duas e verdadeira, e a venda some
+  // das duas quebras.
+  let offerType = venda.offerType || null;
   let sendToMeta = true;   // produto nao cadastrado = envia
   if (venda.productCode) {
     const pr = await pool.query(
@@ -35,6 +48,11 @@ async function processarVenda(pool, venda) {
       if (!funnel) funnel = pr.rows[0];
     }
   }
+
+  // Terminal, e por isso vem depois do bloco acima: comissao de produto de
+  // terceiro nao vai para a Meta nem se alguem cadastrar esse produto com
+  // send_to_meta = true. Inflaria a otimizacao das nossas campanhas.
+  if (venda.enviarMeta === false) sendToMeta = false;
 
   if (!funnel) {
     const act = await pool.query('SELECT * FROM funnels WHERE active');

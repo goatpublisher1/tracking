@@ -80,3 +80,63 @@ test('event_log.src usa o mesmo fallback que sales.src (Digistore24 sem venda.sr
   assert.ok(eventLog, 'event_log deveria ter sido gravado');
   assert.strictEqual(eventLog.params[1], 'fb_utm_123');
 });
+
+// Pool falso que resolve funil por SLUG, o caminho do postback de afiliado.
+function fakePoolComSlug() {
+  const calls = [];
+  const funnelRow = { id: 7, slug: 'chemistrysystem-fb1', domain: 'www.chemistrysystem.com',
+    pixel_id: '999', capi_token: 'tok', currency: 'USD', active: true };
+  return {
+    calls,
+    async query(text, params) {
+      calls.push({ text, params });
+      if (text.includes('WHERE active AND slug = $1')) return { rows: [funnelRow] };
+      if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [funnelRow] };
+      return { rows: [] };
+    },
+  };
+}
+
+test('funnelSlug resolve o funil sem sck e sem produto cadastrado', async () => {
+  const pool = fakePoolComSlug();
+  const venda = { txId: 'ds24a_1', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null,
+    paid: false, value: 51, total: 97, origem: 'digistore24_afiliado' };
+  await processarVenda(pool, venda);
+  const args = insertSalesArgs(pool.calls);
+  assert.strictEqual(args[17], 7, 'funnel_id deveria ser o do funil achado pelo slug');
+  assert.strictEqual(args[7], 'USD', 'a moeda vem do funil resolvido');
+});
+
+test('enviarMeta false nao chama a Meta mesmo com venda paga e funil resolvido', async (t) => {
+  const fetchOriginal = global.fetch;
+  let chamou = false;
+  global.fetch = async () => { chamou = true; return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+
+  const pool = fakePoolComSlug();
+  const venda = { txId: 'ds24a_2', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null,
+    paid: true, value: 51, total: 97, enviarMeta: false, origem: 'digistore24_afiliado' };
+  const r = await processarVenda(pool, venda);
+  assert.strictEqual(chamou, false, 'a CAPI nao podia ter sido chamada');
+  assert.strictEqual(r.motivo, 'produto_nao_envia_meta');
+});
+
+test('offerType da venda e gravado quando nao ha produto cadastrado', async () => {
+  const pool = fakePoolComSlug();
+  const venda = { txId: 'ds24a_3', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null,
+    paid: false, value: 51, total: 97, offerType: 'backend', origem: 'digistore24_afiliado' };
+  await processarVenda(pool, venda);
+  assert.strictEqual(insertSalesArgs(pool.calls)[18], 'backend');
+});
+
+test('venda sem os campos novos se comporta como antes (PayT nao regride)', async () => {
+  const pool = fakePool();
+  const venda = { txId: 'T10', sck: 'idx_x', src: 'fb1', paid: false, value: 100, total: 100,
+    origem: 'payt' };
+  await processarVenda(pool, venda);
+  const args = insertSalesArgs(pool.calls);
+  assert.strictEqual(args[17], null, 'sem funil resolvido, funnel_id segue null');
+  assert.strictEqual(args[18], null, 'sem produto cadastrado, offer_type segue null');
+  // e nenhuma consulta por slug foi feita
+  assert.ok(!pool.calls.some(c => c.text.includes('WHERE active AND slug = $1')));
+});
