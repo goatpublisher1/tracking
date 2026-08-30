@@ -309,7 +309,9 @@ app.get('/webhook/digistore24-afiliado', async (req, res) => {
     }
 
     if (!venda.txId) {
-      console.error('AFILIADO_SEM_TXID', JSON.stringify(q).slice(0, 500));
+      // nunca o q inteiro: tem o token. So o resto, no espirito do log acima.
+      const { token, ...semToken } = q;
+      console.error('AFILIADO_SEM_TXID', JSON.stringify(semToken).slice(0, 500));
       return res.send('OK');
     }
 
