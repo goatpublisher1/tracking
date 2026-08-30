@@ -104,4 +104,4 @@ function normalizarDigistore(params) {
   };
 }
 
-module.exports = { assinaturaValida, stringParaAssinar, normalizarDigistore };
+module.exports = { assinaturaValida, stringParaAssinar, normalizarDigistore, traduzirStatus };
