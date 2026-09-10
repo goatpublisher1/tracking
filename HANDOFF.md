@@ -437,7 +437,7 @@ Sem este passo, "o rolling update está ligado" é suposição, não fato verifi
 
 A janela de incompatibilidade existe, e é de mão única: rodar o `ALTER TABLE` antes do deploy é seguro (o código hoje em produção ignora coluna que não conhece, e o `DEFAULT` preenche o que já existe). Subir o deploy antes do `ALTER TABLE` derruba 100% das vendas — das duas plataformas, não só Digistore24 — porque todo `INSERT` em `sales` passa a referenciar `plataforma` e falha com `column "plataforma" of relation "sales" does not exist`; a exception cai no catch do webhook (responde 200), e a venda some sem retry e sem rastro.
 
-**Por isso o `ALTER TABLE` e sua verificação agora são o item 1 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
+**Por isso o `ALTER TABLE` e sua verificação agora são o item 2 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
 
 ### Rollback
 
