@@ -2,11 +2,22 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece.
+1. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
    ```bash
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS gclid TEXT, ADD COLUMN IF NOT EXISTS gbraid TEXT, ADD COLUMN IF NOT EXISTS wbraid TEXT"
    ```
    Rollback: `ALTER TABLE clicks DROP COLUMN gclid, DROP COLUMN gbraid, DROP COLUMN wbraid`.
+
+   No mesmo container, com o mesmo `node scripts/q.js`, e **ANTES do deploy do dashboard**
+   (os `INSERT` de produto do dashboard passam a nomear a coluna `send_to_google`), rodar
+   também as duas sentenças de
+   `docs/migrations-tracking/2026-09-10-products-send-to-google.sql` (repositório do
+   dashboard):
+   ```bash
+   node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_google BOOLEAN NOT NULL DEFAULT true"
+   node scripts/q.js "UPDATE products SET send_to_google = COALESCE(send_to_meta, true)"
+   ```
+   Rollback: `ALTER TABLE products DROP COLUMN send_to_google`.
 2. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
    ```bash
    node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
