@@ -10,7 +10,7 @@
 // =====================================================================
 const express = require('express');
 const { Pool } = require('pg');
-const { normalizeUtms } = require('./normalize');
+const { normalizeUtms, clickIds } = require('./normalize');
 const { sendPurchase } = require('./capi');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
@@ -140,15 +140,17 @@ app.post('/collect', async (req, res) => {
 
     // registra o clique com UTMs limpas
     const u = normalizeUtms(b.utms || {});
+    const g = clickIds(b);
     await pool.query(
       `INSERT INTO clicks (sck, src, fbp, fbc, fbclid, ip, user_agent, landing_url,
          utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-         campaign_id, adset_id, ad_id, placement, funnel_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+         campaign_id, adset_id, ad_id, placement, funnel_id, gclid, gbraid, wbraid)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
       [b.sck, b.src, b.fbp, b.fbc, b.fbclid, req.ip || b.ip,
        b.user_agent || req.headers['user-agent'], b.page_location,
        u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content, u.utm_term,
-       u.campaign_id, u.adset_id, u.ad_id, u.placement, funnel ? funnel.id : null]
+       u.campaign_id, u.adset_id, u.ad_id, u.placement, funnel ? funnel.id : null,
+       g.gclid, g.gbraid, g.wbraid]
     );
 
     res.json({ ok: true });

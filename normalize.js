@@ -68,4 +68,17 @@ function normalizeUtms(raw = {}) {
   };
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource };
+// Identificadores de clique do Google Ads. gclid vem no desktop/Android; gbraid e
+// wbraid no iOS (App Tracking Transparency). Nenhum e usado pelo servidor — sao
+// gravados em clicks para o dashboard montar o upload de conversoes.
+const CLICK_KEYS = ['gclid', 'gbraid', 'wbraid'];
+function clickIds(b) {
+  const out = {};
+  for (const k of CLICK_KEYS) {
+    const v = b && typeof b[k] === 'string' ? b[k].trim() : '';
+    out[k] = v ? v.slice(0, 200) : null;
+  }
+  return out;
+}
+
+module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds };

@@ -5,7 +5,7 @@ Multi-funil: cada domínio tem seu pixel; uma venda dispara só para o pixel do
 domínio dela.
 
 ## Rotas
-- `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`)
+- `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`). Aceita `gclid`, `gbraid`, `wbraid` no corpo e grava em `clicks`.
 - `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase
 - `POST /webhook/digistore24` — IPN de venda da Digistore24
 - `GET /webhook/digistore24-afiliado` — postback S2S de comissao de afiliado da Digistore24

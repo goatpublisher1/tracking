@@ -2,7 +2,12 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
+1. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece.
+   ```bash
+   node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS gclid TEXT, ADD COLUMN IF NOT EXISTS gbraid TEXT, ADD COLUMN IF NOT EXISTS wbraid TEXT"
+   ```
+   Rollback: `ALTER TABLE clicks DROP COLUMN gclid, DROP COLUMN gbraid, DROP COLUMN wbraid`.
+2. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
    ```bash
    node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
    ```
@@ -11,14 +16,14 @@
    node scripts/q.js "SELECT plataforma, count(*) FROM sales GROUP BY 1"
    ```
    Esperado: uma linha, `payt`, com o total de vendas.
-2. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
-3. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
-4. **Conferir os produtos cadastrados.**
+3. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
+4. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
+5. **Conferir os produtos cadastrados.**
    ```sql
    SELECT product_code, offer_type, send_to_meta, active FROM products ORDER BY funnel_slug;
    ```
    Confirme que todo upsell está marcado corretamente — a partir do `event_id` por transação (Task 6), upsells deixam de colidir com a venda principal e passam a ser enviados à Meta individualmente, então um `send_to_meta` errado aqui agora tem efeito imediato.
-5. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
+6. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
 
 Feito isso: suba a branch com **`PAYT_AUTH_ENFORCE` e `CORS_ALLOWLIST_ENFORCE` ambos ausentes/desligados**. Os dois entram em modo shadow (só logam) até os critérios de liberação das seções Task 5 e Task 10 serem cumpridos.
 
