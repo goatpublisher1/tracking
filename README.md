@@ -18,9 +18,9 @@ domínio dela.
 | `PAYT_INTEGRATION_KEY` | sim | Chave de integração da conta PayT (painel da PayT). O webhook valida o campo `integration_key` do payload contra ela. Nada a configurar na PayT. |
 | `PAYT_AUTH_ENFORCE` | não | `1` rejeita webhook sem token (401). Ausente = só loga. Kill switch. |
 | `DIGISTORE_IPN_PASSPHRASE` | sim (se usar Digistore24) | Passphrase de IPN configurada na conta Digistore24. O webhook valida a assinatura `sha_sign` do payload contra ela. |
-| `DIGISTORE_AUTH_ENFORCE` | não | `1` rejeita IPN com assinatura inválida (401). Ausente = só loga. Kill switch. |
+| `DIGISTORE_AUTH_ENFORCE` | não | `1` rejeita IPN com assinatura inválida (401). Ausente = só loga. Kill switch. **Não ligue** enquanto o log mostrar `DIGISTORE_AUTH_NEGADO` em IPN real: em 2026-09-11 eram 34 de 34. O log `DIGISTORE_ASSINATURA_OK <variante>` diz qual algoritmo bate (`estrita` ou `sem_vazios`, esta a do guia). |
 | `DIGISTORE_AFILIADO_TOKEN` | sim (se usar o postback de afiliado) | Token da URL do postback S2S de afiliado (`?token=`), gerado por nós. Token errado devolve 401 sempre — sem kill switch, o postback não assina o payload. |
-| `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`. Ausente = origem ainda refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
+| `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`: origem fora da lista recebe 403 e não grava. Ausente = origem refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
 | `PORT` | não | Padrão 3000 |
 
 ## Schema
@@ -79,3 +79,14 @@ Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
 - **Slug de funil digitado errado na URL do postback de afiliado:** procure
   `AFILIADO_FUNIL_NAO_ENCONTRADO` — `funil` presente mas sem funil ativo com
   esse slug.
+
+## Vendas de teste e reprocesso (auditoria 2026-09-11)
+- Teste (`api_mode=test` na Digistore24, `test:true` na PayT) grava `sales.status='test'`, nunca `paid`:
+  fica fora de receita, do CSV do Google e do reprocesso. `capi_response` recebe `{"skipped":"modo_teste"}`.
+- `scripts/reprocessa-capi.js` não reenvia venda que o caminho normal pulou de propósito
+  (`{"skipped":...}`: teste, produto sem envio, afiliado) e, em venda multi-pixel parcial, manda só
+  para as pixels que não receberam 200. `event_time` usa `created_at` (o `paid_at` da PayT chega 3h errado).
+- `sales.status` não regride: `refunded`/`chargeback` não voltam para `paid`/`pending`, e `paid` não volta para `pending`.
+- Domínio sem funil ativo não recebe CAPI (a venda continua gravada com o `funnel_id` desativado).
+- Os logs `PAYT_WEBHOOK` e `DIGISTORE_IPN` só trazem `{tx, status, teste, sck}` — nunca o payload.
+- Em falha de gravação no IPN da Digistore24 a resposta é `500 ERRO`, para ela reentregar (até 20× em 10 dias).

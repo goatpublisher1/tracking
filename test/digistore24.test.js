@@ -175,3 +175,24 @@ test('params vazios ou invalidos nao lancam', () => {
     assert.strictEqual(v.value, 0);
   }
 });
+
+// ---- auditoria 2026-09-11
+
+test('assinatura calculada sem os parametros vazios tambem e aceita, e a variante e informada', () => {
+  const { varianteDaAssinatura, stringParaAssinar } = require('../digistore24');
+  const crypto = require('crypto');
+  const comVazios = { ...PARAMS, address_company: '', billing_street2: '' };
+  const semVazios = crypto.createHash('sha512').update(stringParaAssinar(comVazios, PASSPHRASE, true), 'utf8').digest('hex').toUpperCase();
+  assert.strictEqual(semVazios, ASSINATURA); // vazios fora = mesma string do vetor oficial
+  assert.strictEqual(varianteDaAssinatura(comVazios, PASSPHRASE, ASSINATURA), 'sem_vazios');
+  assert.strictEqual(varianteDaAssinatura({ ...PARAMS }, PASSPHRASE, ASSINATURA), 'estrita');
+  assert.strictEqual(varianteDaAssinatura(comVazios, 'errada', ASSINATURA), null);
+  assert.strictEqual(assinaturaValida({ ...comVazios, sha_sign: ASSINATURA }, PASSPHRASE), true);
+});
+
+test('api_mode test grava status test e paid false', () => {
+  const v = normalizarDigistore({ ...IPN, api_mode: 'test' });
+  assert.strictEqual(v.status, 'test');
+  assert.strictEqual(v.paid, false);
+  assert.strictEqual(v.teste, true);
+});

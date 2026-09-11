@@ -59,12 +59,15 @@ async function processarVenda(pool, venda) {
     if (act.rows.length === 1) funnel = act.rows[0];
   }
 
-  // MULTI-PIXEL: todos os funis ativos do mesmo dominio do funil achado
+  // MULTI-PIXEL: todos os funis ativos do mesmo dominio do funil achado. Sem fallback para
+  // `[funnel]`: quando o dominio nao tem mais nenhum funil ativo, o funil resolvido pelo
+  // store/produto e um desativado — a venda continua gravada com o funnel_id dele (atribuicao
+  // no dashboard), mas pixel desligado nao recebe CAPI.
   let funnels = [];
   if (funnel) {
     const all = await pool.query(
       'SELECT * FROM funnels WHERE active AND domain = $1', [funnel.domain]);
-    funnels = all.rows.length ? all.rows : [funnel];
+    funnels = all.rows;
   }
 
   // ---- dados do browser gravados no checkout
@@ -93,7 +96,13 @@ async function processarVenda(pool, venda) {
        payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
      ON CONFLICT (transaction_id) DO UPDATE SET
-       status = EXCLUDED.status,
+       -- transicoes: estado terminal (refunded/chargeback) nao volta para paid/pending por
+       -- um webhook atrasado ou reapresentado, e paid nao regride para pending. Um 'test'
+       -- nunca sobrescreve estado real, e vice-versa nao acontece (mesma transacao).
+       status = CASE
+         WHEN sales.status IN ('refunded','chargeback') AND EXCLUDED.status IN ('paid','pending','waiting_payment') THEN sales.status
+         WHEN sales.status = 'paid' AND EXCLUDED.status IN ('pending','waiting_payment') THEN sales.status
+         ELSE EXCLUDED.status END,
        event_id = EXCLUDED.event_id,
        -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
        value = GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0)),
@@ -131,7 +140,9 @@ async function processarVenda(pool, venda) {
   // ---- CAPI para CADA pixel ativo do dominio (multi-conta)
   // Upsell/backend ficam no banco mas nao vao para a Meta, para nao inflar
   // a otimizacao das campanhas.
-  if (paid && venda.teste) {
+  // Teste ja chega com status 'test' e paid=false dos normalizadores; o marcador em
+  // capi_response continua para o reprocesso e para quem for reconciliar.
+  if (venda.teste) {
     await pool.query(
       `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
       ['{"skipped":"modo_teste"}', txId]);

@@ -59,9 +59,11 @@ function normalizarPayt(payload) {
     txIdBruto: txId,
     sck: digSck(p) || p?.customer?.origin?.query_params?.click_id || null,
     src: digSrc(p) || null,
-    status,
-    paid,
-    teste: false,                                   // a PayT nao marca teste no payload
+    status: p?.test === true ? 'test' : status,
+    // `test` chega no topo do payload real (visto no log de producao). Mesma regra da
+    // Digistore24: teste grava status 'test', fora de receita, Google e reprocesso.
+    paid: p?.test !== true && paid,
+    teste: p?.test === true,
     // sem guard de NaN: o handler original tambem escrevia NaN quando
     // commission[].amount nao era numerico. Corrigir isso e um defeito
     // pre-existente separado, fora do escopo deste refactor (extracao

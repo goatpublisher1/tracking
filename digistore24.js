@@ -8,9 +8,14 @@ const { tokenValido } = require('./auth');
 // Algoritmo do guia oficial de IPN (pagina 20):
 // remove sha_sign, ordena as chaves sem diferenciar maiusculas, e concatena
 // "nome=valor" + passphrase para cada parametro, sem separador. SHA-512 hex.
-function stringParaAssinar(params, passphrase) {
+// `semVazios`: o guia tambem diz que parametros com valor vazio ficam fora da string. O IPN
+// real chega com dezenas de campos vazios (address_company, billing_street2...), e e a
+// hipotese mais provavel para a assinatura nunca bater em producao (34 de 34 IPNs negados
+// no log). As duas variantes sao aceitas enquanto o enforce esta em shadow; o log diz qual.
+function stringParaAssinar(params, passphrase, semVazios = false) {
   return Object.keys(params)
     .filter(k => k !== 'sha_sign' && k !== 'SHASIGN')
+    .filter(k => !semVazios || (params[k] !== '' && params[k] !== null && params[k] !== undefined))
     .sort((a, b) => {
       const x = a.toLowerCase(), y = b.toLowerCase();
       return x < y ? -1 : x > y ? 1 : 0;
@@ -26,14 +31,22 @@ function assinaturaValida(params, passphrase) {
   const recebida = params.sha_sign || params.SHASIGN;
   if (typeof recebida !== 'string' || !recebida) return false;
 
-  const esperada = crypto
-    .createHash('sha512')
-    .update(stringParaAssinar(params, passphrase), 'utf8')
-    .digest('hex')
-    .toUpperCase();
+  const variante = varianteDaAssinatura(params, passphrase, recebida);
+  return variante !== null;
+}
 
-  // comparacao em tempo constante (mesma usada no gate da PayT)
-  return tokenValido(recebida.toUpperCase(), esperada);
+// 'estrita' (todos os parametros) ou 'sem_vazios'; null = nenhuma bate.
+function varianteDaAssinatura(params, passphrase, recebida) {
+  for (const [nome, semVazios] of [['estrita', false], ['sem_vazios', true]]) {
+    const esperada = crypto
+      .createHash('sha512')
+      .update(stringParaAssinar(params, passphrase, semVazios), 'utf8')
+      .digest('hex')
+      .toUpperCase();
+    // comparacao em tempo constante (mesma usada no gate da PayT)
+    if (tokenValido(recebida.toUpperCase(), esperada)) return nome;
+  }
+  return null;
 }
 
 const PREFIXO = 'ds24_';
@@ -83,8 +96,11 @@ function normalizarDigistore(params) {
     // sid1 e do postback S2S de afiliado, nao existe no IPN de venda -> src
     // fica sempre null nesta plataforma (nao e bug, nao precisa investigar).
     src: p.sid1 || null,
-    status: traduzirStatus(p),
-    paid: traduzirStatus(p) === 'paid',
+    // Venda de teste (api_mode) grava status 'test' em vez do estado real: e o que a tira do
+    // faturamento, do CSV do Google e do reprocesso, que filtram por 'paid'. Gravar 'paid'
+    // com um marcador so em capi_response inflava receita e ROAS com compra que nao existiu.
+    status: p.api_mode === 'test' ? 'test' : traduzirStatus(p),
+    paid: p.api_mode !== 'test' && traduzirStatus(p) === 'paid',
     teste: p.api_mode === 'test',
     value: num(p.amount_vendor),      // a parte do vendedor
     total: num(p.amount_brutto),      // o que o cliente pagou
@@ -104,4 +120,4 @@ function normalizarDigistore(params) {
   };
 }
 
-module.exports = { assinaturaValida, stringParaAssinar, normalizarDigistore, traduzirStatus };
+module.exports = { assinaturaValida, varianteDaAssinatura, stringParaAssinar, normalizarDigistore, traduzirStatus };

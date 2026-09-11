@@ -140,3 +140,52 @@ test('venda sem os campos novos se comporta como antes (PayT nao regride)', asyn
   // e nenhuma consulta por slug foi feita
   assert.ok(!pool.calls.some(c => c.text.includes('WHERE active AND slug = $1')));
 });
+
+// ---- auditoria 2026-09-11: sem fallback para pixel desativado, e teste sem CAPI
+
+test('dominio sem funil ativo nao dispara CAPI para o funil desativado (T07)', async (t) => {
+  const capi = require('../capi');
+  let chamadas = 0;
+  t.mock.method(capi, 'sendPurchase', async () => { chamadas++; return { httpStatus: 200, response: {}, payload: {} }; });
+  const desativado = { id: 1, slug: 'velho', domain: 'x.com', pixel_id: '1', capi_token: 't', currency: 'BRL', active: false };
+  const calls = [];
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    if (text === 'SELECT funnel_id FROM store WHERE sck=$1') return { rows: [{ funnel_id: 1 }] };
+    if (text === 'SELECT * FROM funnels WHERE id=$1') return { rows: [desativado] };
+    if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [] };
+    return { rows: [] };
+  } };
+  const r = await processarVenda(pool, { txId: 't7', sck: 'idx_1', paid: true, status: 'paid', value: 10 });
+  assert.strictEqual(chamadas, 0);
+  assert.strictEqual(r.motivo, 'funnel_nao_resolvido');
+  // a venda continua gravada com o funil desativado (atribuicao)
+  assert.strictEqual(insertSalesArgs(calls)[17], 1);
+});
+
+test('venda de teste grava o marcador e nunca chama a Meta, mesmo com funil e pixel ativos', async (t) => {
+  const capi = require('../capi');
+  let chamadas = 0;
+  t.mock.method(capi, 'sendPurchase', async () => { chamadas++; return { httpStatus: 200, response: {}, payload: {} }; });
+  const funnelRow = { id: 1, slug: 'f', domain: 'x.com', pixel_id: '1', capi_token: 't', currency: 'BRL', active: true };
+  const calls = [];
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    if (text.includes('WHERE active AND slug = $1')) return { rows: [funnelRow] };
+    if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [funnelRow] };
+    return { rows: [] };
+  } };
+  const r = await processarVenda(pool, { txId: 't5', funnelSlug: 'f', paid: false, teste: true, status: 'test', value: 10 });
+  assert.strictEqual(chamadas, 0);
+  assert.strictEqual(r.motivo, 'teste');
+  assert.strictEqual(insertSalesArgs(calls)[4], 'test');
+  assert.ok(calls.some(c => c.text.includes('SET capi_response') && c.params[0].includes('modo_teste')));
+});
+
+test('o upsert de sales nao deixa paid regredir para pending nem terminal voltar a paid', async () => {
+  const pool = fakePool();
+  await processarVenda(pool, { txId: 'tx', status: 'paid', paid: true, value: 1 });
+  const sql = pool.calls.find(c => c.text.includes('INSERT INTO sales')).text;
+  assert.ok(/sales\.status IN \('refunded','chargeback'\)/.test(sql));
+  assert.ok(/sales\.status = 'paid' AND EXCLUDED\.status IN \('pending','waiting_payment'\)/.test(sql));
+});

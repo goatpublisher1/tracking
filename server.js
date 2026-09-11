@@ -15,7 +15,7 @@ const { sendPurchase } = require('./capi');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
 const { processarVenda } = require('./vendas');
-const { assinaturaValida, normalizarDigistore } = require('./digistore24');
+const { varianteDaAssinatura, normalizarDigistore } = require('./digistore24');
 const { normalizarAfiliado } = require('./digistore24-afiliado');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -65,6 +65,12 @@ app.use('/collect', function (req, res, next) {
   if (o) console.log('CORS_ORIGIN', o);
   const permitida = o && origensPermitidas.has(o);
   if (o && !permitida) console.warn('CORS_ORIGEM_NEGADA', o);
+  // Com enforce ligado, origem fora da lista nao so perde o header: nao grava. Sem isto o
+  // gate era so cosmetico — um POST simples (text/plain, sem preflight) gravava do mesmo
+  // jeito. Lista vazia continua falhando aberto (cold start), como abaixo.
+  if (o && !permitida && origensPermitidas.size && process.env.CORS_ALLOWLIST_ENFORCE === '1') {
+    return res.sendStatus(403);
+  }
   // enforce desligado: reflete mesmo assim (comportamento de hoje). O log
   // CORS_ORIGEM_NEGADA acima e o sinal que decide quando ligar o enforce.
   // allowlist vazia = nunca carregou (cold start / banco fora do ar) — nao e
@@ -185,11 +191,12 @@ app.post('/webhook/payt', async (req, res) => {
       if (process.env.PAYT_AUTH_ENFORCE === '1') return res.sendStatus(401);
     }
 
-    // LOG TEMPORARIO: registra o payload para descobrir onde a PayT poe o sck.
-    // Remover depois de identificar a estrutura.
-    try { console.log('PAYT_WEBHOOK', JSON.stringify(p).slice(0, 2000)); } catch (e) {}
-
     const venda = normalizarPayt(p);
+    // So o que identifica a chamada: o payload inteiro carregava integration_key, e-mail e
+    // telefone para o log (a estrutura do sck ja esta mapeada em payt.js).
+    console.log('PAYT_WEBHOOK', JSON.stringify({
+      tx: venda.txIdBruto || null, status: venda.status, teste: venda.teste, sck: !!venda.sck,
+    }));
     const { sck, src, paid, value, total, txId } = venda;
     const statusBruto = venda.status;
 
@@ -197,7 +204,7 @@ app.post('/webhook/payt', async (req, res) => {
 
     // se a PayT mudar o vocabulario de status, hoje as conversoes parariam de
     // ser enviadas sem nenhum sinal. Este log e o sinal.
-    const CONHECIDOS = ['paid','waiting_payment','pending','refused','canceled','refunded','chargeback','expired'];
+    const CONHECIDOS = ['paid','waiting_payment','pending','refused','canceled','refunded','chargeback','expired','test'];
     if (statusBruto && !CONHECIDOS.includes(statusBruto)) {
       console.warn('PAYT_STATUS_DESCONHECIDO', statusBruto, p?.transaction_id);
     }
@@ -236,7 +243,11 @@ app.post('/webhook/digistore24', async (req, res) => {
   try {
     const p = req.body || {};
 
-    const ok = assinaturaValida(p, process.env.DIGISTORE_IPN_PASSPHRASE);
+    const variante = varianteDaAssinatura(p, process.env.DIGISTORE_IPN_PASSPHRASE, String(p.sha_sign || p.SHASIGN || ''));
+    const ok = variante !== null;
+    // Qual variante bate diz se o guia (sem vazios) ou a implementacao antiga esta certa —
+    // e o dado que decide ligar o DIGISTORE_AUTH_ENFORCE.
+    if (ok) console.log('DIGISTORE_ASSINATURA_OK', variante);
     if (!ok) {
       console.warn('DIGISTORE_AUTH_NEGADO', JSON.stringify({
         ip: req.ip,
@@ -247,15 +258,15 @@ app.post('/webhook/digistore24', async (req, res) => {
       if (process.env.DIGISTORE_AUTH_ENFORCE === '1') return res.sendStatus(401);
     }
 
-    // LOG TEMPORARIO: descobrir o formato real do IPN em producao.
-    try { console.log('DIGISTORE_IPN', JSON.stringify(p).slice(0, 2000)); } catch (e) {}
-
     const venda = normalizarDigistore(p);
+    console.log('DIGISTORE_IPN', JSON.stringify({
+      tx: venda.txIdBruto || null, status: venda.status, teste: venda.teste, sck: !!venda.sck,
+    }));
 
     // Vocabulario ja traduzido por normalizarDigistore, o mesmo que a PayT grava. O aviso
     // volta a significar "chegou estado que nao sei traduzir", em vez de disparar no caminho
     // normal — foi assim que 'Payment' passou batido ate a primeira venda do SWH.
-    const CONHECIDOS = ['paid', 'refunded', 'chargeback', 'pending'];
+    const CONHECIDOS = ['paid', 'refunded', 'chargeback', 'pending', 'test'];
     if (venda.status && !CONHECIDOS.includes(venda.status)) {
       console.warn('DIGISTORE_STATUS_DESCONHECIDO', venda.status, venda.txIdBruto);
     }
@@ -271,13 +282,21 @@ app.post('/webhook/digistore24', async (req, res) => {
       }));
     }
 
-    await processarVenda(pool, venda);
+    try {
+      await processarVenda(pool, venda);
+    } catch (e) {
+      // Falha ao GRAVAR (banco fora, timeout): aqui vale a reentrega da Digistore24 — ate 20
+      // vezes em 10 dias — porque a venda ainda nao esta em `sales` e nada a recuperaria
+      // depois. Qualquer resposta que nao seja 'OK' provoca o reenvio.
+      console.error('DIGISTORE_GRAVACAO_FALHOU', venda.txIdBruto, String(e).slice(0, 300));
+      return res.status(500).send('ERRO');
+    }
 
     res.send('OK');
   } catch (e) {
     console.error('digistore24 webhook error', e);
-    // mesmo em erro interno respondemos OK: a alternativa e a Digistore24
-    // reenviar 20 vezes o mesmo payload que ja falhou. A falha fica no log.
+    // Erro antes da gravacao (normalizacao, assinatura): OK mesmo assim — reenviar 20 vezes o
+    // mesmo payload que ja falhou so repete o erro. A falha fica no log.
     res.send('OK');
   }
 });

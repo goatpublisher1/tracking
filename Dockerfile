@@ -3,7 +3,7 @@
 #  Coloque este arquivo na MESMA pasta dos .js e do package.json.
 #  No Coolify: New Resource → Application → Dockerfile.
 # =====================================================================
-FROM node:20-slim
+FROM node:22-slim
 
 WORKDIR /app
 
@@ -16,7 +16,7 @@ RUN npm ci --omit=dev
 # copia o restante do código
 COPY . .
 
-# a imagem node:20-slim ja traz o usuario 'node'. Sem isto o processo roda
+# a imagem node:22-slim ja traz o usuario 'node'. Sem isto o processo roda
 # como root com o DATABASE_URL e alcance a todos os capi_token.
 USER node
 

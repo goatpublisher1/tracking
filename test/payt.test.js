@@ -94,3 +94,12 @@ test('value reproduz NaN do handler original para commission nao numerica', () =
   const v = normalizarPayt({ commission: [{ type: 'producer', amount: 'abc' }] });
   assert.ok(Number.isNaN(v.value), 'esperado NaN, veio ' + v.value);
 });
+
+// ---- auditoria 2026-09-11
+test('test:true no topo do payload grava status test e paid false', () => {
+  const v = normalizarPayt({ status: 'paid', transaction_id: 'x', test: true });
+  assert.strictEqual(v.status, 'test');
+  assert.strictEqual(v.paid, false);
+  assert.strictEqual(v.teste, true);
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction_id: 'x', test: false }).paid, true);
+});
