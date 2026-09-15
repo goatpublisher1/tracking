@@ -41,6 +41,14 @@ async function herdarTipoDoProduto() {
         WHERE p.product_code = s.product_code AND p.active
           AND s.offer_type IS DISTINCT FROM p.offer_type`);
     if (r.rowCount) console.log('OFFER_TYPE_HERDADO', r.rowCount);
+    // Venda sem funil (sem sck e produto ainda nao cadastrado na hora — tipico de recuperacao)
+    // ganha o funil do produto. So preenche vazio: funil ja resolvido pelo sck nao muda.
+    const f = await pool.query(
+      `UPDATE sales s SET funnel_id = f.id
+         FROM products p JOIN funnels f ON f.slug = p.funnel_slug
+        WHERE p.product_code = s.product_code AND p.active AND f.active
+          AND s.funnel_id IS NULL`);
+    if (f.rowCount) console.log('FUNNEL_ID_HERDADO', f.rowCount);
   } catch (err) { console.error('OFFER_TYPE_HERDADO_ERRO', err); }
 }
 herdarTipoDoProduto();
