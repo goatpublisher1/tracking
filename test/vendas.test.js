@@ -189,3 +189,12 @@ test('o upsert de sales nao deixa paid regredir para pending nem terminal voltar
   assert.ok(/sales\.status IN \('refunded','chargeback'\)/.test(sql));
   assert.ok(/sales\.status = 'paid' AND EXCLUDED\.status IN \('pending','waiting_payment'\)/.test(sql));
 });
+
+test('refunded_at e gravado quando a venda vira refunded/chargeback, e so na primeira vez', async () => {
+  const pool = fakePool();
+  await processarVenda(pool, { txId: 'r1', status: 'refunded', paid: false, value: 1 });
+  const sql = pool.calls.find(c => c.text.includes('INSERT INTO sales')).text;
+  assert.ok(/CASE WHEN \$5 IN \('refunded','chargeback'\) THEN now\(\) END/.test(sql));
+  assert.ok(/WHEN sales\.refunded_at IS NULL AND EXCLUDED\.status IN \('refunded','chargeback'\) THEN now\(\)/.test(sql));
+  assert.ok(/ELSE sales\.refunded_at END/.test(sql));
+});

@@ -93,8 +93,10 @@ async function processarVenda(pool, venda) {
     `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
        currency, product_code, product_name, customer_email, customer_phone,
        utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
-       payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+       payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma,
+       refunded_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
+       CASE WHEN $5 IN ('refunded','chargeback') THEN now() END)
      ON CONFLICT (transaction_id) DO UPDATE SET
        -- transicoes: estado terminal (refunded/chargeback) nao volta para paid/pending por
        -- um webhook atrasado ou reapresentado, e paid nao regride para pending. Um 'test'
@@ -125,7 +127,11 @@ async function processarVenda(pool, venda) {
        customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
        offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
        payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
-       paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at)`,
+       paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at),
+       -- a hora em que a venda virou reembolso/chargeback: so na primeira vez, e nunca apagada
+       refunded_at = CASE
+         WHEN sales.refunded_at IS NULL AND EXCLUDED.status IN ('refunded','chargeback') THEN now()
+         ELSE sales.refunded_at END`,
     [txId, 'purchase_' + txId, sck, srcFinal, venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,

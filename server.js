@@ -23,6 +23,11 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // redeploy do banco) faz o Pool emitir 'error'. EventEmitter sem listener em
 // 'error' LANÇA e mata o processo — e isso acontece fora de qualquer try/catch.
 pool.on('error', (err) => console.error('PG_POOL_ERROR', err));
+// Sem schema versionado (ver README), a coluna nova entra aqui, idempotente. `refunded_at`
+// e quando a venda virou refunded/chargeback — sem ela o dashboard so sabe a data da VENDA,
+// e a taxa de reembolso caia no dia errado.
+pool.query('ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ')
+  .catch((err) => console.error('SCHEMA_REFUNDED_AT', err));
 process.on('unhandledRejection', (err) => console.error('UNHANDLED_REJECTION', err));
 const app = express();
 // Atrás do Traefik/Coolify. Sem isto, req.ip devolve o IP da rede interna do
