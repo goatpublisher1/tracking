@@ -28,6 +28,23 @@ pool.on('error', (err) => console.error('PG_POOL_ERROR', err));
 // e a taxa de reembolso caia no dia errado.
 pool.query('ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ')
   .catch((err) => console.error('SCHEMA_REFUNDED_AT', err));
+
+// Venda gravada ANTES de o produto ser cadastrado ficou com offer_type nulo (ou o que a
+// plataforma mandou). O cadastro do produto e a fonte da verdade — em vendas.js ele ja
+// sobrescreve o tipo na hora do webhook —, entao aqui as vendas antigas herdam o tipo
+// tambem. Roda no boot e de hora em hora; e um UPDATE que nao faz nada quando esta tudo certo.
+async function herdarTipoDoProduto() {
+  try {
+    const r = await pool.query(
+      `UPDATE sales s SET offer_type = p.offer_type
+         FROM products p
+        WHERE p.product_code = s.product_code AND p.active
+          AND s.offer_type IS DISTINCT FROM p.offer_type`);
+    if (r.rowCount) console.log('OFFER_TYPE_HERDADO', r.rowCount);
+  } catch (err) { console.error('OFFER_TYPE_HERDADO_ERRO', err); }
+}
+herdarTipoDoProduto();
+setInterval(herdarTipoDoProduto, 60 * 60 * 1000).unref();
 process.on('unhandledRejection', (err) => console.error('UNHANDLED_REJECTION', err));
 const app = express();
 // Atrás do Traefik/Coolify. Sem isto, req.ip devolve o IP da rede interna do
