@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { hash, buildPurchaseEvent, fbcDe, buildInitiateCheckoutEvent } = require('../capi');
+const { hash, buildPurchaseEvent, fbcDe, buildInitiateCheckoutEvent, sendEvent } = require('../capi');
 const { normCidade, normEstado, normPais, normTelefone } = require('../geo');
 
 test('hash normaliza trim e lowercase antes do sha256', () => {
@@ -140,15 +140,26 @@ test('Purchase: ip cai para o da venda (PayT manda) quando o store nao tem', () 
   assert.strictEqual(ev.user_data.client_ip_address, '1.2.3.4');
 });
 
-test('Purchase sem os dados novos e identico ao de antes (nao-regressao)', () => {
-  const store = { fbp: 'fb.1.1.2', fbc: 'fb.1.1.X', ip_override: '9.9.9.9', user_agent: 'UA', page_location: 'https://x/y' };
-  const sale = { transaction_id: 'T1', value: 97, customer_email: 'a@b.com', customer_phone: '11999998888', customer_name: 'Ana Souza', product_code: 'P1', product_name: 'Prod' };
+test('Purchase de hoje sai igual, mais o external_id', () => {
+  // linha de store como a real: todas as colunas, geo e external_id nulos
+  const store = { sck: 'idx_abc', src: 'fb', fbp: 'fb.1.1.2', fbc: 'fb.1.1.X', ip_override: '9.9.9.9',
+    user_agent: 'UA', page_location: 'https://x/y', external_id: null, city: null, state: null, country: null };
+  const sale = { transaction_id: 'T1', value: 97, event_time: 1700000000, customer_email: 'a@b.com',
+    customer_phone: '11999998888', customer_name: 'Ana Souza', product_code: 'P1', product_name: 'Prod' };
   const ev = buildPurchaseEvent({ funnel: funnelX, sale, store });
-  assert.deepStrictEqual(Object.keys(ev.user_data).sort(),
-    ['client_ip_address', 'client_user_agent', 'em', 'fbc', 'fbp', 'fn', 'ln', 'ph'].sort());
-  assert.strictEqual(ev.event_id, 'purchase_T1');
-  assert.strictEqual(ev.event_source_url, 'https://x/y');
-  assert.strictEqual(ev.custom_data.order_id, 'T1');
+  // esperado montado do jeito antigo: hash das mesmas entradas
+  const esperado = {
+    event_name: 'Purchase', event_time: 1700000000, event_id: 'purchase_T1', action_source: 'website',
+    event_source_url: 'https://x/y',
+    custom_data: { currency: 'BRL', value: 97, content_ids: ['P1'], content_name: 'Prod', order_id: 'T1' },
+  };
+  const { user_data, ...resto } = ev;
+  assert.deepStrictEqual(resto, esperado);
+  assert.deepStrictEqual(user_data, {
+    em: hash('a@b.com'), ph: hash(normTelefone('11999998888')), fn: hash('Ana'), ln: hash('Souza'),
+    client_user_agent: 'UA', client_ip_address: '9.9.9.9', fbc: 'fb.1.1.X', fbp: 'fb.1.1.2',
+    external_id: hash('idx_abc'),
+  });
 });
 
 test('IC: event_id e o sck cru, user_data so com o que o clique tem, sem custom_data', () => {
@@ -170,4 +181,40 @@ test('IC: event_id e o sck cru, user_data so com o que o clique tem, sem custom_
 
 test('IC sem sck nao e construido', () => {
   assert.strictEqual(buildInitiateCheckoutEvent({ funnel: funnelX, click: { fbp: 'x' } }), null);
+});
+
+test('IC: created_at invalido cai para agora (event_time finito)', () => {
+  const ev = buildInitiateCheckoutEvent({ funnel: funnelX, click: { sck: 's', user_agent: 'UA', created_at: 'nao e data' } });
+  assert.ok(Number.isInteger(ev.event_time));
+  assert.ok(Math.abs(ev.event_time - Math.floor(Date.now() / 1000)) < 5);
+});
+
+test('IC sem user_agent nao e construido (Meta exige em evento de website)', () => {
+  assert.strictEqual(buildInitiateCheckoutEvent({ funnel: funnelX, click: { sck: 's', fbp: 'x' } }), null);
+});
+
+test('sendEvent: corpo com data e token; test_event_code so quando ha valor nao vazio', async (t) => {
+  const envAntes = process.env.META_TEST_EVENT_CODE;
+  const fetchAntes = global.fetch;
+  t.after(() => {
+    if (envAntes === undefined) delete process.env.META_TEST_EVENT_CODE; else process.env.META_TEST_EVENT_CODE = envAntes;
+    global.fetch = fetchAntes;
+  });
+  let chamada;
+  global.fetch = async (url, opts) => { chamada = { url, body: JSON.parse(opts.body) }; return { status: 200, json: async () => ({ ok: 1 }) }; };
+  const event = { event_name: 'Purchase', event_id: 'e1' };
+
+  delete process.env.META_TEST_EVENT_CODE;
+  const r = await sendEvent({ funnel: funnelX, event });
+  assert.ok(chamada.url.endsWith('/123/events'));
+  assert.deepStrictEqual(chamada.body, { data: [event], access_token: 'tok' });
+  assert.deepStrictEqual(r, { httpStatus: 200, response: { ok: 1 }, payload: event });
+
+  process.env.META_TEST_EVENT_CODE = '  ';
+  await sendEvent({ funnel: funnelX, event });
+  assert.strictEqual('test_event_code' in chamada.body, false);
+
+  process.env.META_TEST_EVENT_CODE = ' TEST123 ';
+  await sendEvent({ funnel: funnelX, event });
+  assert.strictEqual(chamada.body.test_event_code, 'TEST123');
 });

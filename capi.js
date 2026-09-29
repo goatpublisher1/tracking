@@ -97,10 +97,12 @@ function buildPurchaseEvent({ funnel, sale, store, click }) {
 // sck cru: e o eventID que o header ja manda no fbq('track','InitiateCheckout'),
 // e e por ele que a Meta deduplica pixel x servidor (48h). Sem custom_data.
 function buildInitiateCheckoutEvent({ funnel, click }) {
-  if (!click || !click.sck) return null;
+  // sem sck nao ha event_id; sem user_agent a Meta rejeita evento de website
+  if (!click || !click.sck || !click.user_agent) return null;
+  const ms = click.created_at ? new Date(click.created_at).getTime() : NaN;
   return clean({
     event_name: 'InitiateCheckout',
-    event_time: Math.floor((click.created_at ? new Date(click.created_at).getTime() : Date.now()) / 1000),
+    event_time: Math.floor((Number.isFinite(ms) ? ms : Date.now()) / 1000),
     event_id: click.sck,
     action_source: 'website',
     event_source_url: click.landing_url || undefined,
@@ -117,7 +119,8 @@ async function sendEvent({ funnel, event }) {
   // Com META_TEST_EVENT_CODE definido os eventos aparecem em tempo real na aba
   // "Testar eventos" do Gerenciador de Eventos e NAO contam para otimizacao.
   // So para conferir a integracao; em producao fica vazio.
-  if (process.env.META_TEST_EVENT_CODE) body.test_event_code = process.env.META_TEST_EVENT_CODE;
+  const testCode = (process.env.META_TEST_EVENT_CODE || '').trim();
+  if (testCode) body.test_event_code = testCode;
 
   const res = await fetch(url, {
     method: 'POST',
@@ -137,7 +140,7 @@ async function sendPurchase({ funnel, sale, store, click }) {
 
 async function sendInitiateCheckout({ funnel, click }) {
   const event = buildInitiateCheckoutEvent({ funnel, click });
-  if (!event) return { httpStatus: 0, response: { skipped: 'sem_sck' }, payload: null };
+  if (!event) return { httpStatus: 0, response: { skipped: 'sem_sck_ou_user_agent' }, payload: null };
   return sendEvent({ funnel, event });
 }
 
