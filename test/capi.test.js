@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { hash, buildPurchaseEvent } = require('../capi');
+const { hash, buildPurchaseEvent, fbcDe, buildInitiateCheckoutEvent } = require('../capi');
 const { normCidade, normEstado, normPais, normTelefone } = require('../geo');
 
 test('hash normaliza trim e lowercase antes do sha256', () => {
@@ -85,4 +85,89 @@ test('normalizacao devolve undefined para vazio', () => {
   assert.strictEqual(normCidade(''), undefined);
   assert.strictEqual(normEstado(null), undefined);
   assert.strictEqual(normTelefone(undefined), undefined);
+});
+
+const funnelX = { pixel_id: '123', capi_token: 'tok', currency: 'BRL' };
+
+test('fbc: usa o cookie quando existe; senao monta do fbclid com o timestamp do clique', () => {
+  assert.strictEqual(fbcDe('fb.1.1700000000000.ABC', 'XYZ', new Date(0)), 'fb.1.1700000000000.ABC');
+  assert.strictEqual(fbcDe(null, 'XYZ', new Date(1700000000000)), 'fb.1.1700000000000.XYZ');
+  assert.strictEqual(fbcDe('', 'XYZ', '2023-11-14T22:13:20.000Z'), 'fb.1.1700000000000.XYZ');
+  assert.strictEqual(fbcDe(null, null, new Date()), undefined);
+  assert.strictEqual(fbcDe(null, 'XYZ', null), undefined);
+});
+
+test('Purchase: geo cai para a venda quando o store nao tem, ja normalizado', () => {
+  const ev = buildPurchaseEvent({
+    funnel: funnelX,
+    sale: { transaction_id: 'T1', value: 97, city: 'Sao Paulo', state: 'SP', country: 'Brasil' },
+    store: {},
+  });
+  assert.strictEqual(ev.user_data.ct, hash('saopaulo'));
+  assert.strictEqual(ev.user_data.st, hash('sp'));
+  assert.strictEqual(ev.user_data.country, hash('br'));
+});
+
+test('Purchase: store vence a venda no geo, e US chega como us', () => {
+  const ev = buildPurchaseEvent({
+    funnel: funnelX,
+    sale: { transaction_id: 'T1', value: 97, country: 'Brasil' },
+    store: { country: 'United States' },
+  });
+  assert.strictEqual(ev.user_data.country, hash('us'));
+});
+
+test('Purchase: external_id e o hash do sck; ausente sem sck', () => {
+  const com = buildPurchaseEvent({ funnel: funnelX, sale: { transaction_id: 'T1', value: 1, sck: 'idx_abc' }, store: null });
+  assert.strictEqual(com.user_data.external_id, hash('idx_abc'));
+  const sem = buildPurchaseEvent({ funnel: funnelX, sale: { transaction_id: 'T1', value: 1 }, store: null });
+  assert.strictEqual(sem.user_data.external_id, undefined);
+});
+
+test('Purchase: fbc monta do fbclid do clique quando o store nao tem cookie', () => {
+  const ev = buildPurchaseEvent({
+    funnel: funnelX,
+    sale: { transaction_id: 'T1', value: 1 },
+    store: { fbp: 'fb.1.1.2' },
+    click: { fbclid: 'CLK', created_at: new Date(1700000000000) },
+  });
+  assert.strictEqual(ev.user_data.fbc, 'fb.1.1700000000000.CLK');
+  assert.strictEqual(ev.user_data.fbp, 'fb.1.1.2');
+});
+
+test('Purchase: ip cai para o da venda (PayT manda) quando o store nao tem', () => {
+  const ev = buildPurchaseEvent({ funnel: funnelX, sale: { transaction_id: 'T1', value: 1, ip: '1.2.3.4' }, store: null });
+  assert.strictEqual(ev.user_data.client_ip_address, '1.2.3.4');
+});
+
+test('Purchase sem os dados novos e identico ao de antes (nao-regressao)', () => {
+  const store = { fbp: 'fb.1.1.2', fbc: 'fb.1.1.X', ip_override: '9.9.9.9', user_agent: 'UA', page_location: 'https://x/y' };
+  const sale = { transaction_id: 'T1', value: 97, customer_email: 'a@b.com', customer_phone: '11999998888', customer_name: 'Ana Souza', product_code: 'P1', product_name: 'Prod' };
+  const ev = buildPurchaseEvent({ funnel: funnelX, sale, store });
+  assert.deepStrictEqual(Object.keys(ev.user_data).sort(),
+    ['client_ip_address', 'client_user_agent', 'em', 'fbc', 'fbp', 'fn', 'ln', 'ph'].sort());
+  assert.strictEqual(ev.event_id, 'purchase_T1');
+  assert.strictEqual(ev.event_source_url, 'https://x/y');
+  assert.strictEqual(ev.custom_data.order_id, 'T1');
+});
+
+test('IC: event_id e o sck cru, user_data so com o que o clique tem, sem custom_data', () => {
+  const ev = buildInitiateCheckoutEvent({
+    funnel: funnelX,
+    click: { sck: 'idx_abc', fbp: 'fb.1.1.2', fbc: null, fbclid: 'CLK', ip: '1.2.3.4', user_agent: 'UA',
+             landing_url: 'https://x/vsl', created_at: new Date(1700000000000) },
+  });
+  assert.strictEqual(ev.event_name, 'InitiateCheckout');
+  assert.strictEqual(ev.event_id, 'idx_abc');
+  assert.strictEqual(ev.action_source, 'website');
+  assert.strictEqual(ev.event_source_url, 'https://x/vsl');
+  assert.strictEqual(ev.custom_data, undefined);
+  assert.deepStrictEqual(ev.user_data, {
+    client_ip_address: '1.2.3.4', client_user_agent: 'UA',
+    fbp: 'fb.1.1.2', fbc: 'fb.1.1700000000000.CLK', external_id: hash('idx_abc'),
+  });
+});
+
+test('IC sem sck nao e construido', () => {
+  assert.strictEqual(buildInitiateCheckoutEvent({ funnel: funnelX, click: { fbp: 'x' } }), null);
 });
