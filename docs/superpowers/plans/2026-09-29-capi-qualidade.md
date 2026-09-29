@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Sistema EM PRODUÇÃO.** O `/collect` roda a cada clique de checkout de 10 funis; `vendas.js` processa vendas reais. Nenhuma mudança pode atrasar a resposta do `/collect` nem alterar quais vendas vão para a Meta.
+- **Sistema EM PRODUÇÃO.** O `/collect` roda a cada clique de checkout de 10 funis; `vendas.js` processa vendas reais. Nenhuma mudança pode atrasar a resposta do `/collect` nem alterar quais vendas vão para a Meta. **Não-regressão do Purchase:** todo campo que sai hoje continua saindo com o mesmo valor; o que este plano faz é **acrescentar** campos (`external_id`, geo, `fbc` do `fbclid`, IP da venda) — o `external_id = hash(sck)` passa a ir em toda venda que tem `store`, e isso é o desenho aprovado, não regressão.
 - Nenhuma dependência npm nova, nos dois repositórios.
 - Tracking: CommonJS, `npm test` (`node --test`), comentários **sem acento**. `||` ≠ `??` de propósito — não "limpar". Sem rede e sem banco nos testes (pool falso, `fetch` falso).
 - Dashboard: `npm run check` (lint + typecheck + `tests/*.test.ts`), mensagens em português acentuado, leitura do tracking só por `query` de `src/lib/tracking/db.ts`. `diag-funis.ts` untracked na raiz — não commitar.
