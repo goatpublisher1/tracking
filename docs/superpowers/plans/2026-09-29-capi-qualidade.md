@@ -17,7 +17,7 @@
 - **`event_id` do Purchase continua `'purchase_' + transaction_id`.** O do IC é o `sck` cru — tem que ser idêntico ao `eventID` que o header já manda no `fbq('track','InitiateCheckout')`.
 - Hash sempre SHA-256 de valor normalizado (`hash()` já existente); nunca mandar `fbclid` cru como `fbc`.
 - Nenhum banco alcançável da máquina de desenvolvimento.
-- Baselines: tracking **68 passando, 0 falhas**; dashboard **490 / 469 passando / 21 skips / 0 falhas**.
+- Baselines: tracking **77 passando, 0 falhas**; dashboard **490 / 469 passando / 21 skips / 0 falhas**.
 
 ---
 
@@ -128,7 +128,7 @@ function normPais(v) {
 }
 ```
 
-- [ ] **Step 4: Ver passar** — `npm test` (68 + 2 = 70).
+- [ ] **Step 4: Ver passar** — `npm test` (77 + 2 = 79).
 
 - [ ] **Step 5: Commit** — `git commit -m "feat: normPais entende os paises do trafego (US, GB, CA, ...)"`
 
@@ -371,7 +371,7 @@ module.exports = {
 
 Atualizar o comentário do topo do arquivo: "Purchase: 12 user_data" continua verdade; acrescentar uma linha "InitiateCheckout: 5 user_data do clique, event_id = sck (dedupe com o pixel)".
 
-- [ ] **Step 4: Ver passar** — `npm test` (70 + 9 = 79). Os testes antigos de `capi.test.js` e `vendas.test.js` continuam verdes: `click` é opcional e `sale` sem os campos novos produz o mesmo evento.
+- [ ] **Step 4: Ver passar** — `npm test` (79 + 9 = 88). Os testes antigos de `capi.test.js` e `vendas.test.js` continuam verdes: `click` é opcional e `sale` sem os campos novos produz o mesmo evento.
 
 - [ ] **Step 5: Commit** — `git commit -m "feat: Purchase com geo, external_id, fbc do fbclid e ip da venda; IC server-side; test_event_code"`
 
@@ -439,7 +439,7 @@ e `sendPurchase({ funnel: f, sale, store })` vira `sendPurchase({ funnel: f, sal
 
 Nada mais em `vendas.js`.
 
-- [ ] **Step 4: Ver passar** — `npm test` (79 + 1 = 80).
+- [ ] **Step 4: Ver passar** — `npm test` (88 + 1 = 89).
 
 - [ ] **Step 5: Commit** — `git commit -m "feat: vendas.js entrega sck, geo, ip e o clique ao Purchase da CAPI"`
 
@@ -616,7 +616,7 @@ Em `server.js`:
 
 Atualizar o cabeçalho de rotas do arquivo: `POST /collect ... (store + clicks + IC via CAPI)`.
 
-- [ ] **Step 5: Ver passar** — `node --check server.js && npm test` (80 + 5 = 85).
+- [ ] **Step 5: Ver passar** — `node --check server.js && npm test` (89 + 5 = 94).
 
 - [ ] **Step 6: Commit** — `git commit -m "feat: InitiateCheckout pela CAPI a partir do /collect, sem bloquear a resposta"`
 
