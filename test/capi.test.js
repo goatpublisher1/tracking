@@ -49,6 +49,26 @@ test('estado: sigla de 2 letras minuscula', () => {
   assert.strictEqual(normEstado('Minas Gerais'), 'mg');
 });
 
+test('pais: ISO-2 minusculo a partir de sigla, nome ou ISO-3', () => {
+  assert.strictEqual(normPais('BR'), 'br');
+  assert.strictEqual(normPais('Brasil'), 'br');
+  assert.strictEqual(normPais('US'), 'us');
+  assert.strictEqual(normPais('USA'), 'us');
+  assert.strictEqual(normPais('United States'), 'us');
+  assert.strictEqual(normPais('Estados Unidos'), 'us');
+  assert.strictEqual(normPais('United Kingdom'), 'gb');
+  assert.strictEqual(normPais('UK'), 'gb');
+  assert.strictEqual(normPais('Canada'), 'ca');
+  assert.strictEqual(normPais('Portugal'), 'pt');
+  assert.strictEqual(normPais('Australia'), 'au');
+});
+
+test('pais desconhecido fica ausente, nao inventado', () => {
+  assert.strictEqual(normPais('Atlantida'), undefined);
+  assert.strictEqual(normPais(''), undefined);
+  assert.strictEqual(normPais(null), undefined);
+});
+
 test('pais: ISO de 2 letras minuscula', () => {
   assert.strictEqual(normPais('BR'), 'br');
   assert.strictEqual(normPais('Brasil'), 'br');

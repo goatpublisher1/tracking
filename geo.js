@@ -30,12 +30,36 @@ function normEstado(v) {
   return UF[k] || undefined;
 }
 
-// ISO-3166 alpha-2 minusculo
+// ISO-3166 alpha-2 minusculo. Aceita sigla de 2, ISO-3 e o nome por extenso nos
+// idiomas em que as plataformas mandam (PayT: pt; Digistore24: en). Desconhecido
+// fica ausente — a Meta diz que campo errado e pior que campo faltando.
+const PAIS = {
+  br:'br', bra:'br', brasil:'br', brazil:'br',
+  us:'us', usa:'us', unitedstates:'us', unitedstatesofamerica:'us', estadosunidos:'us', eua:'us',
+  ca:'ca', can:'ca', canada:'ca',
+  gb:'gb', gbr:'gb', uk:'gb', unitedkingdom:'gb', reinounido:'gb', greatbritain:'gb',
+  au:'au', aus:'au', australia:'au',
+  pt:'pt', prt:'pt', portugal:'pt',
+  es:'es', esp:'es', spain:'es', espanha:'es', espana:'es',
+  mx:'mx', mex:'mx', mexico:'mx',
+  de:'de', deu:'de', germany:'de', alemanha:'de', deutschland:'de',
+  fr:'fr', fra:'fr', france:'fr', franca:'fr',
+  it:'it', ita:'it', italy:'it', italia:'it',
+  ie:'ie', irl:'ie', ireland:'ie', irlanda:'ie',
+  nz:'nz', nzl:'nz', newzealand:'nz', novazelandia:'nz',
+  ar:'ar', arg:'ar', argentina:'ar',
+  cl:'cl', chl:'cl', chile:'cl',
+  co:'co', col:'co', colombia:'co',
+};
+
 function normPais(v) {
   if (!v) return undefined;
   const k = semAcento(v).toLowerCase().replace(/[^a-z]/g, '');
+  if (!k) return undefined;
+  if (PAIS[k]) return PAIS[k];
+  // sigla de 2 letras que nao esta na tabela: e ISO-2 valido na pratica
+  // (a Meta so exige o formato), entao passa.
   if (k.length === 2) return k;
-  if (k === 'brasil' || k === 'brazil') return 'br';
   return undefined;
 }
 
