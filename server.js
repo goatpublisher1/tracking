@@ -1,7 +1,7 @@
 // =====================================================================
 //  server.js — Serviço de eventos (substitui GTM + Stape)
 //  Rotas:
-//    POST /collect              <- página Atomicat grava dados no checkout (store)
+//    POST /collect              <- página Atomicat grava dados no checkout (store + clicks + IC via CAPI)
 //    POST /webhook/payt         <- webhook de venda da PayT (lookup + CAPI)
 //    POST /webhook/digistore24  <- IPN de venda da Digistore24 (lookup + CAPI)
 //    GET  /webhook/digistore24-afiliado <- postback S2S de afiliado (comissao)
@@ -11,7 +11,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const { normalizeUtms, clickIds } = require('./normalize');
-const { sendPurchase } = require('./capi');
+const { enviarIC } = require('./ic');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
 const { processarVenda } = require('./vendas');
@@ -177,11 +177,12 @@ app.post('/collect', async (req, res) => {
     // registra o clique com UTMs limpas
     const u = normalizeUtms(b.utms || {});
     const g = clickIds(b);
-    await pool.query(
+    const ins = await pool.query(
       `INSERT INTO clicks (sck, src, fbp, fbc, fbclid, ip, user_agent, landing_url,
          utm_source, utm_medium, utm_campaign, utm_content, utm_term,
          campaign_id, adset_id, ad_id, placement, funnel_id, gclid, gbraid, wbraid)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+       RETURNING *`,
       [b.sck, b.src, b.fbp, b.fbc, b.fbclid, req.ip || b.ip,
        b.user_agent || req.headers['user-agent'], b.page_location,
        u.utm_source, u.utm_medium, u.utm_campaign, u.utm_content, u.utm_term,
@@ -190,6 +191,16 @@ app.post('/collect', async (req, res) => {
     );
 
     res.json({ ok: true });
+
+    // IC pela CAPI depois de responder: nunca no caminho do clique. O clique
+    // recem-gravado ja tem tudo que o evento precisa (fbp/fbc/fbclid/ip/ua).
+    const clickRow = ins.rows && ins.rows[0];
+    if (funnel && clickRow) {
+      setImmediate(() => {
+        enviarIC(pool, { dominio: funnel.domain, click: clickRow })
+          .catch((e) => console.error('CAPI_IC_FALHOU', JSON.stringify({ etapa: 'setImmediate', erro: String(e).slice(0, 200) })));
+      });
+    }
   } catch (e) {
     console.error('collect error', e);
     res.status(500).json({ error: 'internal' });
