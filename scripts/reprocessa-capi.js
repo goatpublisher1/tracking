@@ -52,6 +52,9 @@ async function main() {
 
     const { rows: st } = await pool.query('SELECT * FROM store WHERE sck=$1', [v.sck]);
     const store = st[0] || null;
+    const { rows: cl } = await pool.query(
+      'SELECT * FROM clicks WHERE sck=$1 ORDER BY created_at DESC LIMIT 1', [v.sck]);
+    const click = cl[0] || null;
     const sale = {
       transaction_id: v.transaction_id,
       value: v.value,
@@ -59,6 +62,10 @@ async function main() {
       product_name: v.product_name,
       customer_email: v.customer_email,
       customer_phone: v.customer_phone,
+      // Para o user_data da CAPI, como no webhook: sck vira external_id; geo e ip da venda.
+      sck: v.sck,
+      city: v.city, state: v.state, country: v.country,
+      ip: v.customer_ip,
       // created_at, nao paid_at: o paid_at da PayT chega com hora de Brasilia rotulada como
       // UTC (3h de erro) e nao existe na Digistore24; created_at erra por segundos.
       event_time: Math.floor(new Date(v.created_at).getTime() / 1000),
@@ -69,7 +76,7 @@ async function main() {
     const resultados = resultadosAnteriores(v.capi_response).filter(r => anteriores.has(String(r.pixel)));
     for (const f of pendentes) {
       try {
-        const r = await sendPurchase({ funnel: f, sale, store });
+        const r = await sendPurchase({ funnel: f, sale, store, click });
         resultados.push({ pixel: f.pixel_id, status: r.httpStatus, resp: r.response });
       } catch (err) {
         resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });

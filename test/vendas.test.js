@@ -103,6 +103,24 @@ test('o Purchase leva sck, geo e ip da venda e o clique com fbclid', async (t) =
   assert.strictEqual(ud.client_ip_address, '5.5.5.5');
 });
 
+test('Purchase que falha (fetch lanca) grava event_log com http_status 0 e a funcao resolve', async (t) => {
+  const fetchOriginal = global.fetch;
+  global.fetch = async () => { throw new Error('timeout'); };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const errOriginal = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = errOriginal; });
+
+  const pool = fakePoolComFunil({ storeRow: { src: 'fb' } });
+  const venda = { txId: 'T6', sck: 'idx_abc', src: 'fb', paid: true, value: 10, total: 10, origem: 'digistore24' };
+  const r = await processarVenda(pool, venda);
+  assert.strictEqual(r.ok, true);
+  const eventLog = pool.calls.find(c => c.text.includes('INSERT INTO event_log'));
+  assert.ok(eventLog, 'event_log deveria ter a linha da falha');
+  assert.strictEqual(eventLog.params[3], 0);
+  assert.strictEqual(eventLog.params[4], null);
+});
+
 // Pool falso que resolve funil por SLUG, o caminho do postback de afiliado.
 function fakePoolComSlug() {
   const calls = [];

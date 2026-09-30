@@ -182,6 +182,14 @@ async function processarVenda(pool, venda) {
           ['purchase_' + txId, srcFinal, f.id, r.httpStatus, JSON.stringify(r.payload)]);
       } catch (err) {
         resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });
+        // Falha (timeout/rede) tambem entra no event_log com status 0, como o IC, para a
+        // aba Meta do dashboard nao contar Purchase que falhou como aceito.
+        try {
+          await pool.query(
+            `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
+             VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
+            ['purchase_' + txId, srcFinal, f.id, 0, null]);
+        } catch (e2) { /* erro de banco aqui nao pode mascarar a falha original */ }
       }
     }
     const algumOk = resultados.some(r => r.status === 200);

@@ -147,7 +147,7 @@ app.post('/collect', async (req, res) => {
 
     const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0];
     const funnel = await funnelByDomain(host);
-    if (!b.sck) {
+    if (!b.sck || b.sck === 'undefined') {
       console.log('collect sem sck. body recebido:', JSON.stringify(req.body).slice(0, 200));
       return res.status(400).json({ error: 'missing sck' });
     }
