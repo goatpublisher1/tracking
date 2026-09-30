@@ -560,6 +560,18 @@ Canal separado do IPN de venda documentado acima: é o postback da conta de afil
 4. **O que registrar como aceito:** o token viaja na query string e aparece em log de acesso do proxy. É o único formato que a Digistore24 oferece neste canal. Rotacionar é trocar a variável e a URL.
 5. **O que não fazer:** não cadastrar os produtos da parceria no dashboard. Eles são de terceiro, o `send_to_meta` deles não seria respeitado como salvaguarda (a rota já força), e o cadastro só criaria a impressão de que o IPN de venda está apontado para nós — não está.
 
+## Qualidade de correspondência (CAPI completa + IC server-side)
+
+O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e o IP da venda, e o `/collect` dispara um InitiateCheckout pela CAPI a cada clique de checkout (uma linha em `event_log` por pixel, `event_name = 'InitiateCheckout'`, `event_id = sck`, `source = 'server'`, gravada em todo caso — com o status HTTP que a Meta devolveu, ou `0` quando ela não respondeu ou o evento foi pulado). O `/collect` responde primeiro; o IC sai depois, em `setImmediate`. Sem banco a mexer: não há `ALTER TABLE`.
+
+1. **Antes do deploy:** anotar a nota EMQ do Purchase de cada pixel (Gerenciador de Eventos › pixel › Purchase › *Qualidade da correspondência*). É o número de comparação do passo 5.
+2. **Deploy do tracking.** Efeito imediato: Purchase com mais campos; IC pela CAPI em todo clique de checkout.
+3. **Conferir com a aba Testar eventos:** definir `META_TEST_EVENT_CODE` com o código da aba (ex.: `TEST12345`), redeploy, fazer um clique de checkout e uma venda de teste; ver o `InitiateCheckout` e o `Purchase` chegarem com os campos de `user_data` reconhecidos. **Apagar a variável e redeployar** — com ela definida os eventos não otimizam nada. Enquanto ela estiver definida, `scripts/reprocessa-capi.js` também manda `test_event_code`; não o rode durante a janela de teste.
+4. **Recolar o header** (depois do deploy do dashboard que traz o header novo — fase *Qualidade de correspondência na Meta* do `SETUP.md` de lá): é o que põe o `external_id` no pixel. Sem recolar, o servidor já manda `external_id`, mas o navegador não.
+5. **Depois de 7 dias:** comparar a nota EMQ com a do passo 1, **por pixel** (a nota é por pixel), no mesmo caminho: Gerenciador de Eventos › pixel › Purchase › *Qualidade da correspondência*. O que mais mexe: `country` (Digistore24), `external_id` (todos), `fbc` montado do `fbclid`.
+6. **Volume:** `event_log` ganha uma linha por pixel por clique de checkout. A retenção de 90 dias sugerida na Task 8 passa a valer a pena.
+7. **Rollback:** `CAPI_IC_DESLIGADO=1` desliga o IC sem deploy (o do pixel continua), mas a mudança da variável no Coolify só vale depois de **reiniciar** o serviço; falhas aparecem como `CAPI_IC_FALHOU` nos logs. O Purchase novo não tem switch — os campos a mais são só dados que a Meta aceita ou ignora.
+
 ## Pendências conhecidas
 
 ### `sales.value` pode conter `NaN` (defeito pré-existente, anterior a esta branch)
@@ -602,15 +614,3 @@ Achados menores da revisão final, deferidos de propósito. `.superpowers/` (ond
 - `console.log('DIGISTORE_IPN', ...)` grava até 2000 caracteres do payload bruto do IPN, incluindo email, nome e telefone do comprador — mesma exposição de PII já listada acima para `PAYT_WEBHOOK`, nunca espelhada para a Digistore24. Revise junto do mesmo item de retenção de log.
 - O script de reprocessamento não grava em `event_log` — reenvios não têm a paridade de auditoria que o webhook tem.
 - `normPais` reconhece `br`/`brasil`/`brazil` e passa através de qualquer código de 2 letras (ISO alpha-2); `normTelefone` prefixa `55` em qualquer número de 10–11 dígitos. Adequado para uma operação só-Brasil; os dois descartam ou forçam em vez de mandar um hash que nunca vai casar.
-
-## Qualidade de correspondência (CAPI completa + IC server-side)
-
-O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e o IP da venda, e o `/collect` dispara um InitiateCheckout pela CAPI a cada clique de checkout (uma linha em `event_log` por pixel, `event_name = 'InitiateCheckout'`, `event_id = sck`, `source = 'server'`, gravada mesmo quando a Meta falha, com `http_status = 0`). O `/collect` responde primeiro; o IC sai depois, em `setImmediate`. Sem banco a mexer: não há `ALTER TABLE`.
-
-1. **Antes do deploy:** anotar a nota EMQ do Purchase de cada pixel (Gerenciador de Eventos › pixel › Purchase › *Qualidade da correspondência*). É o número de comparação do passo 5.
-2. **Deploy do tracking.** Efeito imediato: Purchase com mais campos; IC pela CAPI em todo clique de checkout.
-3. **Conferir com a aba Testar eventos:** definir `META_TEST_EVENT_CODE` com o código da aba (ex.: `TEST12345`), redeploy, fazer um clique de checkout e uma venda de teste; ver o `InitiateCheckout` e o `Purchase` chegarem com os campos de `user_data` reconhecidos. **Apagar a variável e redeployar** — com ela definida os eventos não otimizam nada.
-4. **Recolar o header** (depois do deploy do dashboard, ver a fase no `SETUP.md` de lá): é o que põe o `external_id` no pixel. Sem recolar, o servidor já manda `external_id`, mas o navegador não.
-5. **Depois de 7 dias:** comparar a nota EMQ com a do passo 1. O que mais mexe: `country` (Digistore24), `external_id` (todos), `fbc` montado do `fbclid`.
-6. **Volume:** `event_log` ganha uma linha por pixel por clique de checkout. A retenção de 90 dias sugerida na Task 8 passa a valer a pena.
-7. **Rollback:** `CAPI_IC_DESLIGADO=1` desliga o IC sem deploy (o do pixel continua); falhas aparecem como `CAPI_IC_FALHOU` nos logs. O Purchase novo não tem switch — os campos a mais são só dados que a Meta aceita ou ignora.
