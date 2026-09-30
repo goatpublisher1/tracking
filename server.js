@@ -235,8 +235,11 @@ app.post('/webhook/payt', async (req, res) => {
     const venda = normalizarPayt(p);
     // So o que identifica a chamada: o payload inteiro carregava integration_key, e-mail e
     // telefone para o log (a estrutura do sck ja esta mapeada em payt.js).
+    // `host`: por qual track.<dominio> a plataforma chamou — e o dominio cadastrado como
+    // webhook na conta, o unico que nao pode ser desativado. Nao ha outro jeito de saber.
     console.log('PAYT_WEBHOOK', JSON.stringify({
       tx: venda.txIdBruto || null, status: venda.status, teste: venda.teste, sck: !!venda.sck,
+      host: (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0],
     }));
     const { sck, src, paid, value, total, txId } = venda;
     const statusBruto = venda.status;
@@ -302,6 +305,7 @@ app.post('/webhook/digistore24', async (req, res) => {
     const venda = normalizarDigistore(p);
     console.log('DIGISTORE_IPN', JSON.stringify({
       tx: venda.txIdBruto || null, status: venda.status, teste: venda.teste, sck: !!venda.sck,
+      host: (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0],
     }));
 
     // Vocabulario ja traduzido por normalizarDigistore, o mesmo que a PayT grava. O aviso
