@@ -164,11 +164,17 @@ async function processarVenda(pool, venda) {
       customer_email: venda.email,
       customer_phone: venda.phone,
       customer_name: venda.nome,
+      // Para o user_data da CAPI: sck vira external_id; geo e ip sao fallback
+      // quando o store nao tem (o header nunca mandou geo; PayT manda ip,
+      // Digistore24 manda geo).
+      sck,
+      city: venda.city, state: venda.state, country: venda.country,
+      ip: venda.ip,
     };
     const resultados = [];
     for (const f of funnels) {
       try {
-        const r = await sendPurchase({ funnel: f, sale, store });
+        const r = await sendPurchase({ funnel: f, sale, store, click });
         resultados.push({ pixel: f.pixel_id, status: r.httpStatus, resp: r.response });
         await pool.query(
           `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)

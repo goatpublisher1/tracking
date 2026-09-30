@@ -50,7 +50,7 @@ test('sem venda.src e sem store (ou sem sck), src grava null', async () => {
 
 // Pool falso que resolve um funil (via store.funnel_id) e paga a venda, para exercitar
 // o INSERT INTO event_log — que so acontece depois de um Purchase enviado com sucesso.
-function fakePoolComFunil({ storeRow }) {
+function fakePoolComFunil({ storeRow, clickRow }) {
   const calls = [];
   const funnelRow = { id: 1, slug: 'x-fb1', domain: 'x.com', pixel_id: '123', capi_token: 'tok', currency: 'BRL', active: true };
   return {
@@ -61,7 +61,7 @@ function fakePoolComFunil({ storeRow }) {
       if (text.includes('SELECT * FROM funnels WHERE id=$1')) return { rows: [funnelRow] };
       if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [funnelRow] };
       if (text.includes('SELECT * FROM store WHERE sck=$1')) return { rows: [storeRow] };
-      if (text.includes('FROM clicks WHERE sck=$1')) return { rows: [] };
+      if (text.includes('FROM clicks WHERE sck=$1')) return { rows: clickRow ? [clickRow] : [] };
       return { rows: [] };
     },
   };
@@ -79,6 +79,28 @@ test('event_log.src usa o mesmo fallback que sales.src (Digistore24 sem venda.sr
   const eventLog = pool.calls.find(c => c.text.includes('INSERT INTO event_log'));
   assert.ok(eventLog, 'event_log deveria ter sido gravado');
   assert.strictEqual(eventLog.params[1], 'fb_utm_123');
+});
+
+test('o Purchase leva sck, geo e ip da venda e o clique com fbclid', async (t) => {
+  const fetchOriginal = global.fetch;
+  let corpo = null;
+  global.fetch = async (_url, opts) => { corpo = JSON.parse(opts.body); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'fb', fbp: 'fb.1.1.2' },
+    clickRow: { sck: 'idx_abc', fbclid: 'CLK', created_at: new Date(1700000000000), ip: '5.5.5.5', user_agent: 'UA' },
+  });
+  const venda = { txId: 'T5', sck: 'idx_abc', src: 'fb', paid: true, value: 10, total: 10, origem: 'digistore24',
+    email: 'a@b.com', city: 'Austin', state: 'TX', country: 'United States', ip: null };
+  await processarVenda(pool, venda);
+
+  const ud = corpo.data[0].user_data;
+  assert.ok(ud.external_id, 'external_id (hash do sck) deveria ir');
+  assert.strictEqual(ud.fbc, 'fb.1.1700000000000.CLK');
+  assert.ok(ud.country, 'country deveria ir (United States -> us)');
+  assert.ok(ud.ct && ud.st, 'cidade e estado deveriam ir');
+  assert.strictEqual(ud.client_ip_address, '5.5.5.5');
 });
 
 // Pool falso que resolve funil por SLUG, o caminho do postback de afiliado.
