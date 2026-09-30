@@ -5,7 +5,7 @@ Multi-funil: cada domínio tem seu pixel; uma venda dispara só para o pixel do
 domínio dela.
 
 ## Rotas
-- `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`). Aceita `gclid`, `gbraid`, `wbraid` no corpo e grava em `clicks`.
+- `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`). Aceita `gclid`, `gbraid`, `wbraid` no corpo e grava em `clicks`. Depois de responder, dispara o InitiateCheckout pela CAPI (uma linha em `event_log` por pixel).
 - `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase
 - `POST /webhook/digistore24` — IPN de venda da Digistore24
 - `GET /webhook/digistore24-afiliado` — postback S2S de comissao de afiliado da Digistore24
@@ -21,6 +21,8 @@ domínio dela.
 | `DIGISTORE_AUTH_ENFORCE` | não | `1` rejeita IPN com assinatura inválida (401). Ausente = só loga. Kill switch. **Não ligue** enquanto o log mostrar `DIGISTORE_AUTH_NEGADO` em IPN real: em 2026-09-11 eram 34 de 34. O log `DIGISTORE_ASSINATURA_OK <variante>` diz qual algoritmo bate (`estrita` ou `sem_vazios`, esta a do guia). |
 | `DIGISTORE_AFILIADO_TOKEN` | sim (se usar o postback de afiliado) | Token da URL do postback S2S de afiliado (`?token=`), gerado por nós. Token errado devolve 401 sempre — sem kill switch, o postback não assina o payload. |
 | `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`: origem fora da lista recebe 403 e não grava. Ausente = origem refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
+| `META_TEST_EVENT_CODE` | não | Código da aba *Testar eventos* do Gerenciador de Eventos. Com ele definido, todo evento da CAPI sai com `test_event_code` e aparece lá em tempo real, **sem contar para otimização**. Só para conferir; em produção fica vazio. |
+| `CAPI_IC_DESLIGADO` | não | `1` desliga o InitiateCheckout pela CAPI (o do pixel continua). Kill switch; nasce ligado. |
 | `PORT` | não | Padrão 3000 |
 
 ## Schema
@@ -63,6 +65,10 @@ Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
   Confirme se o domínio está cadastrado e ativo em `funnels.domain`; se
   `CORS_ALLOWLIST_ENFORCE=1` estiver causando falso positivo, desligue a
   variável (kill switch) e reinicie.
+- **InitiateCheckout não chegou à Meta:** procure `CAPI_IC_FALHOU` nos logs (JSON com
+  `pixel`, `sck` e `status`/`erro`). A linha em `event_log` é gravada mesmo assim, com
+  `http_status = 0` quando a Meta não respondeu. Para desligar sem deploy:
+  `CAPI_IC_DESLIGADO=1` e reinicie.
 - **Vendas da Digistore24 pararam de aparecer:** cheque `DIGISTORE_AUTH_NEGADO`
   nos logs. Se houver entradas com `tx` preenchido, desligue
   `DIGISTORE_AUTH_ENFORCE` e verifique a passphrase configurada.
