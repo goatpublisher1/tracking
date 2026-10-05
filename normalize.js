@@ -69,9 +69,10 @@ function normalizeUtms(raw = {}) {
 }
 
 // Identificadores de clique do Google Ads. gclid vem no desktop/Android; gbraid e
-// wbraid no iOS (App Tracking Transparency). Nenhum e usado pelo servidor — sao
-// gravados em clicks para o dashboard montar o upload de conversoes.
-const CLICK_KEYS = ['gclid', 'gbraid', 'wbraid'];
+// wbraid no iOS (App Tracking Transparency). ttclid e o id de clique do TikTok Ads,
+// na URL de entrada. Nenhum e usado pelo servidor — sao gravados em clicks para o
+// dashboard montar o upload de conversoes.
+const CLICK_KEYS = ['gclid', 'gbraid', 'wbraid', 'ttclid'];
 function clickIds(b) {
   const out = {};
   for (const k of CLICK_KEYS) {
@@ -81,4 +82,11 @@ function clickIds(b) {
   return out;
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds };
+// Cookie _ttp do pixel do TikTok, lido pelo header e mandado no /collect.
+// Nao e id de clique (nao vem na URL): e o id do navegador, como o _fbp.
+function ttpDe(b) {
+  const v = b && typeof b.ttp === 'string' ? b.ttp.trim() : '';
+  return v ? v.slice(0, 200) : null;
+}
+
+module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe };
