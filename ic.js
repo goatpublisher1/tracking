@@ -12,6 +12,7 @@
 //  Kill switch: CAPI_IC_DESLIGADO=1.
 // =====================================================================
 const { sendInitiateCheckout } = require('./capi');
+const tiktok = require('./tiktok');
 
 async function enviarIC(pool, { dominio, click }) {
   if (process.env.CAPI_IC_DESLIGADO === '1') return { enviados: 0, aceitos: 0, desligado: true };
@@ -50,4 +51,45 @@ async function enviarIC(pool, { dominio, click }) {
   return { enviados: funnels.length, aceitos };
 }
 
-module.exports = { enviarIC };
+// Mesmo desenho do IC da Meta, para os pixels TikTok do dominio. funnelId e
+// o funil resolvido no /collect (o event_log e por funil; o pixel TikTok e por
+// dominio). Kill switch: TIKTOK_EVENTS_DESLIGADO=1.
+async function enviarICTikTok(pool, { dominio, funnelId, click }) {
+  if (process.env.TIKTOK_EVENTS_DESLIGADO === '1') return { enviados: 0, aceitos: 0, desligado: true };
+  if (!click || !click.sck || !dominio) return { enviados: 0, aceitos: 0 };
+  let pixels = [];
+  try {
+    const r = await pool.query('SELECT * FROM tiktok_pixels WHERE active AND domain = $1', [dominio]);
+    pixels = r.rows || [];
+  } catch (e) {
+    console.error('TIKTOK_FALHOU', JSON.stringify({ etapa: 'pixels', dominio, erro: String(e).slice(0, 200) }));
+    return { enviados: 0, aceitos: 0 };
+  }
+  if (!pixels.length) return { enviados: 0, aceitos: 0 };
+  let aceitos = 0;
+  for (const px of pixels) {
+    let status = 0; let payload = null;
+    try {
+      const r = await tiktok.sendInitiateCheckout({ pixel: px, click });
+      status = r.httpStatus; payload = r.payload;
+      // TikTok rejeita com HTTP 200 + code != 0.
+      const rejeitado = !!(r.response && r.response.code);
+      if (status === 200 && !rejeitado) aceitos++;
+      else console.error('TIKTOK_FALHOU', JSON.stringify({ pixel: px.pixel_code, sck: click.sck, status, resp: r.response }));
+      if (rejeitado) status = 0;
+    } catch (e) {
+      console.error('TIKTOK_FALHOU', JSON.stringify({ pixel: px.pixel_code, sck: click.sck, erro: String(e).slice(0, 200) }));
+    }
+    try {
+      await pool.query(
+        `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload, plataforma)
+         VALUES ('InitiateCheckout',$1,'server',$2,$3,$4,$5,'tiktok')`,
+        [click.sck, click.src || null, funnelId || null, status, payload ? JSON.stringify(payload) : null]);
+    } catch (e) {
+      console.error('TIKTOK_FALHOU', JSON.stringify({ etapa: 'event_log', pixel: px.pixel_code, erro: String(e).slice(0, 200) }));
+    }
+  }
+  return { enviados: pixels.length, aceitos };
+}
+
+module.exports = { enviarIC, enviarICTikTok };

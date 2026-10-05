@@ -11,7 +11,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const { normalizeUtms, clickIds, ttpDe } = require('./normalize');
-const { enviarIC } = require('./ic');
+const { enviarIC, enviarICTikTok } = require('./ic');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
 const { processarVenda } = require('./vendas');
@@ -199,6 +199,8 @@ app.post('/collect', async (req, res) => {
       setImmediate(() => {
         enviarIC(pool, { dominio: funnel.domain, click: clickRow })
           .catch((e) => console.error('CAPI_IC_FALHOU', JSON.stringify({ etapa: 'setImmediate', erro: String(e).slice(0, 200) })));
+        enviarICTikTok(pool, { dominio: funnel.domain, funnelId: funnel.id, click: clickRow })
+          .catch((e) => console.error('TIKTOK_FALHOU', JSON.stringify({ etapa: 'setImmediate', erro: String(e).slice(0, 200) })));
       });
     }
   } catch (e) {
