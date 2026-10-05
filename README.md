@@ -5,9 +5,9 @@ Multi-funil: cada domínio tem seu pixel; uma venda dispara só para o pixel do
 domínio dela.
 
 ## Rotas
-- `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`). Aceita `gclid`, `gbraid`, `wbraid` no corpo e grava em `clicks`. Depois de responder, dispara o InitiateCheckout pela CAPI (uma linha em `event_log` por pixel).
-- `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase
-- `POST /webhook/digistore24` — IPN de venda da Digistore24
+- `POST /collect` — a página do checkout grava fbp/fbc/UTMs no `store` (chave: `sck`). Aceita `gclid`, `gbraid`, `wbraid` no corpo e grava em `clicks`. Depois de responder, dispara o InitiateCheckout pela CAPI (uma linha em `event_log` por pixel) e também à TikTok Events API (`plataforma = 'tiktok'`), usando `ttclid`/`ttp`, que também são gravados em `clicks`.
+- `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase (e o `CompletePayment` da TikTok, se o produto tiver `send_to_tiktok`)
+- `POST /webhook/digistore24` — IPN de venda da Digistore24 (também manda `CompletePayment` à TikTok)
 - `GET /webhook/digistore24-afiliado` — postback S2S de comissao de afiliado da Digistore24
 - `GET /health`
 
@@ -23,6 +23,8 @@ domínio dela.
 | `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`: origem fora da lista recebe 403 e não grava. Ausente = origem refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
 | `META_TEST_EVENT_CODE` | não | Código da aba *Testar eventos* do Gerenciador de Eventos. Com ele definido, todo evento da CAPI sai com `test_event_code` e aparece lá em tempo real, **sem contar para otimização**. Só para conferir; em produção fica vazio. |
 | `CAPI_IC_DESLIGADO` | não | `1` desliga o InitiateCheckout pela CAPI (o do pixel continua). Kill switch; nasce ligado. |
+| `TIKTOK_TEST_EVENT_CODE` | não | Código da aba *Test Events* do TikTok Events Manager. Com ele definido, todo evento da TikTok (de todos os pixels) sai com `test_event_code` e não conta para otimização. Só para conferir; em produção fica vazio. |
+| `TIKTOK_EVENTS_DESLIGADO` | não | `1` desliga o InitiateCheckout e o CompletePayment da TikTok. Kill switch; nasce ligado. |
 | `PORT` | não | Padrão 3000 |
 
 ## Schema
@@ -69,6 +71,9 @@ Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
   `pixel`, `sck` e `status`/`erro`). A linha em `event_log` é gravada mesmo assim, com
   `http_status = 0` quando a Meta não respondeu. Para desligar sem deploy:
   `CAPI_IC_DESLIGADO=1` e reinicie.
+- **Evento não chegou à TikTok:** procure `TIKTOK_FALHOU` nos logs (cobre também HTTP 200 com
+  `code != 0`, gravado em `event_log` com status 0). Confira o pixel e o token em `tiktok_pixels`.
+  Para desligar sem deploy: `TIKTOK_EVENTS_DESLIGADO=1` e reinicie.
 - **Vendas da Digistore24 pararam de aparecer:** cheque `DIGISTORE_AUTH_NEGADO`
   nos logs. Se houver entradas com `tx` preenchido, desligue
   `DIGISTORE_AUTH_ENFORCE` e verifique a passphrase configurada.

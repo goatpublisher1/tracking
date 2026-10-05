@@ -2,7 +2,18 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
+1. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s. Rodar nesta ordem:
+   ```bash
+   node scripts/q.js "CREATE TABLE IF NOT EXISTS tiktok_pixels (id SERIAL PRIMARY KEY, domain TEXT NOT NULL, pixel_code TEXT NOT NULL, access_token TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (domain, pixel_code))"
+   node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS ttclid TEXT, ADD COLUMN IF NOT EXISTS ttp TEXT"
+   node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_tiktok BOOLEAN NOT NULL DEFAULT true"
+   node scripts/q.js "UPDATE products SET send_to_tiktok = COALESCE(send_to_meta, true)"
+   node scripts/q.js "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'meta'"
+   node scripts/q.js "GRANT SELECT, INSERT, UPDATE ON tiktok_pixels TO dashboard_rw"
+   node scripts/q.js "GRANT USAGE, SELECT ON SEQUENCE tiktok_pixels_id_seq TO dashboard_rw"
+   ```
+   Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart desliga os envios à TikTok sem deploy; as colunas e a tabela podem ficar. Detalhes na seção "TikTok — eventos (pixel + Events API)", mais abaixo.
+2. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
    ```bash
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS gclid TEXT, ADD COLUMN IF NOT EXISTS gbraid TEXT, ADD COLUMN IF NOT EXISTS wbraid TEXT"
    ```
@@ -18,7 +29,7 @@
    node scripts/q.js "UPDATE products SET send_to_google = COALESCE(send_to_meta, true)"
    ```
    Rollback: `ALTER TABLE products DROP COLUMN send_to_google`.
-2. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
+3. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
    ```bash
    node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
    ```
@@ -27,14 +38,14 @@
    node scripts/q.js "SELECT plataforma, count(*) FROM sales GROUP BY 1"
    ```
    Esperado: uma linha, `payt`, com o total de vendas.
-3. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
-4. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
-5. **Conferir os produtos cadastrados.**
+4. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
+5. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
+6. **Conferir os produtos cadastrados.**
    ```sql
    SELECT product_code, offer_type, send_to_meta, active FROM products ORDER BY funnel_slug;
    ```
    Confirme que todo upsell está marcado corretamente — a partir do `event_id` por transação (Task 6), upsells deixam de colidir com a venda principal e passam a ser enviados à Meta individualmente, então um `send_to_meta` errado aqui agora tem efeito imediato.
-6. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
+7. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
 
 Feito isso: suba a branch com **`PAYT_AUTH_ENFORCE` e `CORS_ALLOWLIST_ENFORCE` ambos ausentes/desligados**. Os dois entram em modo shadow (só logam) até os critérios de liberação das seções Task 5 e Task 10 serem cumpridos.
 
@@ -448,7 +459,7 @@ Sem este passo, "o rolling update está ligado" é suposição, não fato verifi
 
 A janela de incompatibilidade existe, e é de mão única: rodar o `ALTER TABLE` antes do deploy é seguro (o código hoje em produção ignora coluna que não conhece, e o `DEFAULT` preenche o que já existe). Subir o deploy antes do `ALTER TABLE` derruba 100% das vendas — das duas plataformas, não só Digistore24 — porque todo `INSERT` em `sales` passa a referenciar `plataforma` e falha com `column "plataforma" of relation "sales" does not exist`; a exception cai no catch do webhook (responde 200), e a venda some sem retry e sem rastro.
 
-**Por isso o `ALTER TABLE` e sua verificação agora são o item 2 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
+**Por isso o `ALTER TABLE` e sua verificação agora são o item 3 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
 
 ### Rollback
 
@@ -571,6 +582,26 @@ O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e
 5. **Depois de 7 dias:** comparar a nota EMQ com a do passo 1, **por pixel** (a nota é por pixel), no mesmo caminho: Gerenciador de Eventos › pixel › Purchase › *Qualidade da correspondência*. O que mais mexe: `country` (Digistore24), `external_id` (todos), `fbc` montado do `fbclid`.
 6. **Volume:** `event_log` ganha uma linha por pixel por clique de checkout. A retenção de 90 dias sugerida na Task 8 passa a valer a pena.
 7. **Rollback:** `CAPI_IC_DESLIGADO=1` desliga o IC sem deploy (o do pixel continua), mas a mudança da variável no Coolify só vale depois de **reiniciar** o serviço; falhas aparecem como `CAPI_IC_FALHOU` nos logs. O Purchase novo não tem switch — os campos a mais são só dados que a Meta aceita ou ignora.
+
+## TikTok — eventos (pixel + Events API)
+
+O tracking manda dois eventos à Events API da TikTok: `InitiateCheckout` (disparado pelo `/collect`, em `ic.js`) e `CompletePayment` (disparado pelos webhooks de venda, em `vendas.js`, só para produtos com `products.send_to_tiktok = true`). O pixel é resolvido pelo domínio do funil em `tiktok_pixels`. O SQL é o item 1 do checklist pré-deploy, no topo deste arquivo.
+
+**Variáveis (serviço de tracking no Coolify, com *Available at Runtime* marcado):**
+- `TIKTOK_TEST_EVENT_CODE` (opcional): código da aba *Test Events* do Events Manager; com ele definido, todo evento sai com `test_event_code`. **Afeta TODOS os pixels TikTok, de todos os funis.** Os eventos de teste não otimizam nada e o `vendas.js` os marca como enviados, então as vendas daquela janela se perdem para a otimização. Em produção fica **vazio**; use por minutos e apague logo depois, com restart.
+- `TIKTOK_EVENTS_DESLIGADO` (opcional): `1` desliga `InitiateCheckout` e `CompletePayment` da TikTok. É o kill switch, mas só vale depois de **reiniciar** o serviço.
+
+**O que o dashboard cadastra:** uma linha em `tiktok_pixels` por pixel (domínio, `pixel_code` e o `access_token` gerado em Events Manager › Configurações do pixel › Events API). O token é por pixel e fica na tabela; não vai para variável de ambiente nem para o chat.
+
+**Falhas:** todas saem nos logs com o prefixo `TIKTOK_FALHOU`, inclusive HTTP 200 com `code != 0` na resposta (a TikTok devolve 200 mesmo rejeitando o evento). Esse caso é gravado em `event_log` com status 0. A linha de `event_log` sai com `plataforma = 'tiktok'`.
+
+**Verificação:**
+1. `InitiateCheckout`: defina `TIKTOK_TEST_EVENT_CODE`, reinicie, faça um clique real no botão de checkout e veja o evento na aba *Test Events*. Mantenha a janela em **minutos**, apague a variável e reinicie logo em seguida. Uma venda de teste da PayT/Digistore24 não serve para o `CompletePayment`: tem `teste = true` e o `vendas.js` devolve `modo_teste` antes de qualquer envio.
+2. `CompletePayment`: confira na primeira venda **real** depois do deploy pelo `event_log`:
+   ```bash
+   node scripts/q.js "SELECT payload FROM event_log WHERE plataforma='tiktok' AND event_name='CompletePayment' ORDER BY id DESC LIMIT 1"
+   ```
+3. Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart.
 
 ## Pendências conhecidas
 
