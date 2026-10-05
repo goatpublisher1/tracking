@@ -4,6 +4,7 @@
 //  todo o trabalho de banco e de envio a Meta.
 // =====================================================================
 const { sendPurchase } = require('./capi');
+const { sendCompletePayment } = require('./tiktok');
 
 async function processarVenda(pool, venda) {
   const { txId, sck, paid, value, total } = venda;
@@ -37,14 +38,18 @@ async function processarVenda(pool, venda) {
   // das duas quebras.
   let offerType = venda.offerType || null;
   let sendToMeta = true;   // produto nao cadastrado = envia
+  // TikTok: produto NAO cadastrado nao vai (o upload nao se desfaz; omissao e o
+  // lado seguro). Cadastrado, segue send_to_tiktok.
+  let sendToTikTok = false;
   if (venda.productCode) {
     const pr = await pool.query(
-      `SELECT pr.offer_type, pr.send_to_meta, f.* FROM products pr
+      `SELECT pr.offer_type, pr.send_to_meta, pr.send_to_tiktok, f.* FROM products pr
        JOIN funnels f ON f.slug = pr.funnel_slug
        WHERE pr.product_code = $1 AND pr.active AND f.active LIMIT 1`, [venda.productCode]);
     if (pr.rows[0]) {
       offerType = pr.rows[0].offer_type;
       sendToMeta = pr.rows[0].send_to_meta !== false;
+      sendToTikTok = pr.rows[0].send_to_tiktok === true;
       if (!funnel) funnel = pr.rows[0];
     }
   }
@@ -52,7 +57,7 @@ async function processarVenda(pool, venda) {
   // Terminal, e por isso vem depois do bloco acima: comissao de produto de
   // terceiro nao vai para a Meta nem se alguem cadastrar esse produto com
   // send_to_meta = true. Inflaria a otimizacao das nossas campanhas.
-  if (venda.enviarMeta === false) sendToMeta = false;
+  if (venda.enviarMeta === false) { sendToMeta = false; sendToTikTok = false; }
 
   if (!funnel) {
     const act = await pool.query('SELECT * FROM funnels WHERE active');
@@ -155,30 +160,34 @@ async function processarVenda(pool, venda) {
     return { ok: true, motivo: 'teste' };
   }
 
+  // Fora do bloco da Meta: a TikTok usa o mesmo objeto (a Meta ignora o campo currency).
+  const sale = {
+    transaction_id: txId,
+    value,
+    product_code: venda.productCode,
+    product_name: venda.productName,
+    customer_email: venda.email,
+    customer_phone: venda.phone,
+    customer_name: venda.nome,
+    // Para o user_data da CAPI: sck vira external_id; geo e ip sao fallback
+    // quando o store nao tem (o header nunca mandou geo; PayT manda ip,
+    // Digistore24 manda geo).
+    sck,
+    city: venda.city, state: venda.state, country: venda.country,
+    ip: venda.ip,
+    currency: funnel?.currency || 'BRL',
+  };
+
+  let motivoMeta = null;
   if (paid && funnels.length && sendToMeta) {
-    const sale = {
-      transaction_id: txId,
-      value,
-      product_code: venda.productCode,
-      product_name: venda.productName,
-      customer_email: venda.email,
-      customer_phone: venda.phone,
-      customer_name: venda.nome,
-      // Para o user_data da CAPI: sck vira external_id; geo e ip sao fallback
-      // quando o store nao tem (o header nunca mandou geo; PayT manda ip,
-      // Digistore24 manda geo).
-      sck,
-      city: venda.city, state: venda.state, country: venda.country,
-      ip: venda.ip,
-    };
     const resultados = [];
     for (const f of funnels) {
       try {
         const r = await sendPurchase({ funnel: f, sale, store, click });
         resultados.push({ pixel: f.pixel_id, status: r.httpStatus, resp: r.response });
         await pool.query(
-          `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
-           VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
+          `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload, plataforma)
+           VALUES ('Purchase',$1,'server',$2,$3,$4,$5,'meta')`,
           ['purchase_' + txId, srcFinal, f.id, r.httpStatus, JSON.stringify(r.payload)]);
       } catch (err) {
         resultados.push({ pixel: f.pixel_id, status: 0, resp: String(err).slice(0, 200) });
@@ -186,8 +195,8 @@ async function processarVenda(pool, venda) {
         // aba Meta do dashboard nao contar Purchase que falhou como aceito.
         try {
           await pool.query(
-            `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
-             VALUES ('Purchase',$1,'server',$2,$3,$4,$5)`,
+            `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload, plataforma)
+             VALUES ('Purchase',$1,'server',$2,$3,$4,$5,'meta')`,
             ['purchase_' + txId, srcFinal, f.id, 0, null]);
         } catch (e2) { /* erro de banco aqui nao pode mascarar a falha original */ }
       }
@@ -202,24 +211,59 @@ async function processarVenda(pool, venda) {
     await pool.query(
       `UPDATE sales SET capi_sent=$1, capi_response=$2 WHERE transaction_id=$3`,
       [algumOk, JSON.stringify(resultados), txId]);
-    return { ok: true, motivo: null };
-  }
-
-  if (paid && !sendToMeta) {
+    motivoMeta = null;
+  } else if (paid && !sendToMeta) {
     await pool.query(
       `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
       ['{"skipped":"produto_nao_envia_meta"}', txId]);
-    return { ok: true, motivo: 'produto_nao_envia_meta' };
-  }
-
-  if (paid && !funnels.length) {
+    motivoMeta = 'produto_nao_envia_meta';
+  } else if (paid && !funnels.length) {
     await pool.query(
       `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
       ['{"skipped":"funnel_nao_resolvido"}', txId]);
-    return { ok: true, motivo: 'funnel_nao_resolvido' };
+    motivoMeta = 'funnel_nao_resolvido';
+  } else {
+    motivoMeta = 'nao_pago';
   }
 
-  return { ok: true, motivo: 'nao_pago' };
+  // ---- TikTok: depois da Meta, nunca no caminho dela. Um CompletePayment por
+  // pixel TikTok ativo do dominio; falha vira log e linha no event_log (status 0).
+  if (paid && funnel && sendToTikTok && process.env.TIKTOK_EVENTS_DESLIGADO !== '1') {
+    await enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, txId });
+  }
+
+  return { ok: true, motivo: motivoMeta };
+}
+
+async function enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, txId }) {
+  let pixels = [];
+  try {
+    const r = await pool.query('SELECT * FROM tiktok_pixels WHERE active AND domain = $1', [funnel.domain]);
+    pixels = r.rows || [];
+  } catch (e) {
+    console.error('TIKTOK_FALHOU', JSON.stringify({ etapa: 'pixels', tx: txId, erro: String(e).slice(0, 200) }));
+    return;
+  }
+  for (const px of pixels) {
+    let status = 0; let payload = null;
+    try {
+      const r = await sendCompletePayment({ pixel: px, sale, store, click });
+      status = r.httpStatus; payload = r.payload;
+      if (status !== 200 || (r.response && r.response.code && r.response.code !== 0)) {
+        console.error('TIKTOK_FALHOU', JSON.stringify({ pixel: px.pixel_code, tx: txId, status, resp: r.response }));
+      }
+    } catch (e) {
+      console.error('TIKTOK_FALHOU', JSON.stringify({ pixel: px.pixel_code, tx: txId, erro: String(e).slice(0, 200) }));
+    }
+    try {
+      await pool.query(
+        `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload, plataforma)
+         VALUES ('CompletePayment',$1,'server',$2,$3,$4,$5,'tiktok')`,
+        ['purchase_' + txId, srcFinal, funnel.id, status, payload ? JSON.stringify(payload) : null]);
+    } catch (e) {
+      console.error('TIKTOK_FALHOU', JSON.stringify({ etapa: 'event_log', pixel: px.pixel_code, erro: String(e).slice(0, 200) }));
+    }
+  }
 }
 
 module.exports = { processarVenda };

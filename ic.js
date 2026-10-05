@@ -40,8 +40,8 @@ async function enviarIC(pool, { dominio, click }) {
     }
     try {
       await pool.query(
-        `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload)
-         VALUES ('InitiateCheckout',$1,'server',$2,$3,$4,$5)`,
+        `INSERT INTO event_log (event_name, event_id, source, src, funnel_id, http_status, payload, plataforma)
+         VALUES ('InitiateCheckout',$1,'server',$2,$3,$4,$5,'meta')`,
         [click.sck, click.src || null, f.id, status, JSON.stringify(payload)]);
     } catch (e) {
       console.error('CAPI_IC_FALHOU', JSON.stringify({ etapa: 'event_log', pixel: f.pixel_id, erro: String(e).slice(0, 200) }));

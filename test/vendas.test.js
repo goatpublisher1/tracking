@@ -50,7 +50,7 @@ test('sem venda.src e sem store (ou sem sck), src grava null', async () => {
 
 // Pool falso que resolve um funil (via store.funnel_id) e paga a venda, para exercitar
 // o INSERT INTO event_log — que so acontece depois de um Purchase enviado com sucesso.
-function fakePoolComFunil({ storeRow, clickRow }) {
+function fakePoolComFunil({ storeRow, clickRow, tiktokRows = [], produtoRow = null }) {
   const calls = [];
   const funnelRow = { id: 1, slug: 'x-fb1', domain: 'x.com', pixel_id: '123', capi_token: 'tok', currency: 'BRL', active: true };
   return {
@@ -60,6 +60,9 @@ function fakePoolComFunil({ storeRow, clickRow }) {
       if (text.includes('SELECT funnel_id FROM store WHERE sck=$1')) return { rows: [{ funnel_id: 1 }] };
       if (text.includes('SELECT * FROM funnels WHERE id=$1')) return { rows: [funnelRow] };
       if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [funnelRow] };
+      if (text.includes('WHERE active AND slug = $1')) return { rows: [funnelRow] };
+      if (text.includes('FROM tiktok_pixels')) return { rows: tiktokRows };
+      if (text.includes('FROM products pr')) return { rows: produtoRow ? [produtoRow] : [] };
       if (text.includes('SELECT * FROM store WHERE sck=$1')) return { rows: [storeRow] };
       if (text.includes('FROM clicks WHERE sck=$1')) return { rows: clickRow ? [clickRow] : [] };
       return { rows: [] };
@@ -237,4 +240,84 @@ test('refunded_at e gravado quando a venda vira refunded/chargeback, e so na pri
   assert.ok(/CASE WHEN \$5 IN \('refunded','chargeback'\) THEN now\(\) END/.test(sql));
   assert.ok(/WHEN sales\.refunded_at IS NULL AND EXCLUDED\.status IN \('refunded','chargeback'\) THEN now\(\)/.test(sql));
   assert.ok(/ELSE sales\.refunded_at END/.test(sql));
+});
+
+// ---- TikTok: CompletePayment para os pixels TikTok do dominio ----
+// Produto cadastrado com send_to_tiktok=true (produto nao cadastrado nao vai para a TikTok).
+const produtoTikTok = { offer_type: 'principal', send_to_meta: true, send_to_tiktok: true, id: 1, slug: 'x-fb1', domain: 'x.com', pixel_id: '123', capi_token: 'tok', currency: 'BRL', active: true };
+
+test('venda paga vai para cada pixel TikTok do dominio, com plataforma tiktok no event_log', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url, opts) => { urls.push({ url, body: JSON.parse(opts.body) }); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'tt', fbp: 'fb.1.1.2' },
+    clickRow: { sck: 'idx_abc', ttclid: 'E.C.P.x', ttp: 't1', ip: '5.5.5.5', user_agent: 'UA', created_at: new Date() },
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1', domain: 'x.com', active: true },
+                 { id: 2, pixel_code: 'CA2', access_token: 'k2', domain: 'x.com', active: true }],
+    produtoRow: produtoTikTok,
+  });
+  const venda = { txId: 'T7', sck: 'idx_abc', src: 'tt', paid: true, value: 50, total: 50, origem: 'payt', email: 'a@b.com', productCode: 'P1' };
+  const r = await processarVenda(pool, venda);
+  assert.strictEqual(r.ok, true);
+
+  const tiktok = urls.filter(u => u.url.includes('business-api.tiktok.com'));
+  assert.strictEqual(tiktok.length, 2);
+  assert.deepStrictEqual(tiktok.map(u => u.body.event_source_id).sort(), ['CA1', 'CA2']);
+  assert.strictEqual(tiktok[0].body.data[0].event, 'CompletePayment');
+  assert.strictEqual(tiktok[0].body.data[0].event_id, 'purchase_T7');
+  assert.strictEqual(tiktok[0].body.data[0].user.ttclid, 'E.C.P.x');
+
+  const logs = pool.calls.filter(c => c.text.includes('INSERT INTO event_log'));
+  const tt = logs.filter(c => c.text.includes("'tiktok'"));
+  const meta = logs.filter(c => c.text.includes("'meta'"));
+  assert.strictEqual(tt.length, 2);
+  assert.strictEqual(meta.length, 1);
+  assert.strictEqual(tt[0].params[0], 'purchase_T7');
+});
+
+test('produto com send_to_tiktok=false nao vai para a TikTok (mas vai para a Meta)', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url) => { urls.push(url); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'x' }, clickRow: { sck: 'idx_abc', user_agent: 'UA', ip: '1.1.1.1', created_at: new Date() },
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
+    produtoRow: { ...produtoTikTok, send_to_tiktok: false },
+  });
+  await processarVenda(pool, { txId: 'T8', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  assert.ok(urls.some(u => u.includes('graph.facebook.com')));
+  assert.ok(!urls.some(u => u.includes('business-api.tiktok.com')));
+});
+
+test('TikTok fora do ar nao derruba a venda nem a Meta; event_log com status 0', async (t) => {
+  const fetchOriginal = global.fetch;
+  global.fetch = async (url) => {
+    if (url.includes('tiktok')) throw new Error('ECONNRESET');
+    return { status: 200, json: async () => ({}) };
+  };
+  const erroOriginal = console.error; const erros = [];
+  console.error = (...a) => erros.push(a.join(' '));
+  t.after(() => { global.fetch = fetchOriginal; console.error = erroOriginal; });
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'x' }, clickRow: { sck: 'idx_abc', user_agent: 'UA', ip: '1.1.1.1', created_at: new Date() },
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
+    produtoRow: produtoTikTok,
+  });
+  const r = await processarVenda(pool, { txId: 'T9', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  assert.strictEqual(r.ok, true);
+  const tt = pool.calls.filter(c => c.text.includes('INSERT INTO event_log') && c.text.includes("'tiktok'"));
+  assert.strictEqual(tt.length, 1);
+  assert.strictEqual(tt[0].params[3], 0);
+  assert.ok(erros.some(e => e.includes('TIKTOK_FALHOU')));
+});
+
+test('venda de afiliado (enviarMeta false) tambem nao vai para a TikTok', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url) => { urls.push(url); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const pool = fakePoolComFunil({ storeRow: null, clickRow: null, tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }], produtoRow: produtoTikTok });
+  await processarVenda(pool, { txId: 'ds24a_1', funnelSlug: 'x-fb1', sck: null, paid: true, value: 10, total: 10, enviarMeta: false, origem: 'digistore24_afiliado', productCode: 'P1' });
+  assert.strictEqual(urls.length, 0);
 });
