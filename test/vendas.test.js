@@ -321,3 +321,38 @@ test('venda de afiliado (enviarMeta false) tambem nao vai para a TikTok', async 
   await processarVenda(pool, { txId: 'ds24a_1', funnelSlug: 'x-fb1', sck: null, paid: true, value: 10, total: 10, enviarMeta: false, origem: 'digistore24_afiliado', productCode: 'P1' });
   assert.strictEqual(urls.length, 0);
 });
+
+test('produto nao cadastrado nao vai para a TikTok, mesmo com pixels no dominio', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url) => { urls.push(url); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  for (const productCode of [undefined, 'NAOCADASTRADO']) {
+    const pool = fakePoolComFunil({
+      storeRow: { src: 'x' }, clickRow: { sck: 'idx_abc', user_agent: 'UA', ip: '1.1.1.1', created_at: new Date() },
+      tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
+    });
+    await processarVenda(pool, { txId: 'T10', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode });
+  }
+  assert.ok(urls.some(u => u.includes('graph.facebook.com')));
+  assert.ok(!urls.some(u => u.includes('business-api.tiktok.com')));
+});
+
+test('TikTok rejeita com HTTP 200 e code != 0: event_log grava status 0', async (t) => {
+  const fetchOriginal = global.fetch;
+  global.fetch = async (url) => url.includes('tiktok')
+    ? { status: 200, json: async () => ({ code: 40001, message: 'bad token' }) }
+    : { status: 200, json: async () => ({}) };
+  const erroOriginal = console.error; const erros = [];
+  console.error = (...a) => erros.push(a.join(' '));
+  t.after(() => { global.fetch = fetchOriginal; console.error = erroOriginal; });
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'x' }, clickRow: { sck: 'idx_abc', user_agent: 'UA', ip: '1.1.1.1', created_at: new Date() },
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
+    produtoRow: produtoTikTok,
+  });
+  await processarVenda(pool, { txId: 'T11', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  const tt = pool.calls.filter(c => c.text.includes('INSERT INTO event_log') && c.text.includes("'tiktok'"));
+  assert.strictEqual(tt.length, 1);
+  assert.strictEqual(tt[0].params[3], 0);
+  assert.ok(erros.some(e => e.includes('TIKTOK_FALHOU') && e.includes('40001')));
+});

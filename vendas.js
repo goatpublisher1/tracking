@@ -249,9 +249,12 @@ async function enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, t
     try {
       const r = await sendCompletePayment({ pixel: px, sale, store, click });
       status = r.httpStatus; payload = r.payload;
-      if (status !== 200 || (r.response && r.response.code && r.response.code !== 0)) {
+      const rejeitado = !!(r.response && r.response.code);
+      if (status !== 200 || rejeitado) {
         console.error('TIKTOK_FALHOU', JSON.stringify({ pixel: px.pixel_code, tx: txId, status, resp: r.response }));
       }
+      // TikTok rejeita com HTTP 200 + code != 0: no event_log vira status 0 (nao conta como aceito).
+      if (rejeitado) status = 0;
     } catch (e) {
       console.error('TIKTOK_FALHOU', JSON.stringify({ pixel: px.pixel_code, tx: txId, erro: String(e).slice(0, 200) }));
     }
