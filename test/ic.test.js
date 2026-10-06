@@ -109,3 +109,10 @@ test('IC TikTok: rejeicao (HTTP 200 + code != 0) nao conta como aceito e grava s
   const log = pool.calls.find(c => c.text.includes('INSERT INTO event_log'));
   assert.strictEqual(log.params[3], 0);
 });
+
+test('registro sem pixel no dominio nao manda IC nem grava event_log', async () => {
+  const pool = fakePool([{ id: 3, pixel_id: null, capi_token: null, domain: 'www.x.com', active: true }]);
+  const r = await enviarIC(pool, { dominio: 'www.x.com', click });
+  assert.deepStrictEqual(r, { enviados: 0, aceitos: 0 });
+  assert.strictEqual(pool.calls.filter(c => c.text.includes('INSERT INTO event_log')).length, 0);
+});

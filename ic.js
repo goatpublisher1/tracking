@@ -11,7 +11,7 @@
 //  setImmediate(() => enviarIC(...)). Falha da Meta vira log CAPI_IC_FALHOU.
 //  Kill switch: CAPI_IC_DESLIGADO=1.
 // =====================================================================
-const { sendInitiateCheckout } = require('./capi');
+const { sendInitiateCheckout, temPixel } = require('./capi');
 const tiktok = require('./tiktok');
 
 async function enviarIC(pool, { dominio, click }) {
@@ -22,6 +22,8 @@ async function enviarIC(pool, { dominio, click }) {
   try {
     const r = await pool.query('SELECT * FROM funnels WHERE active AND domain = $1', [dominio]);
     funnels = r.rows || [];
+    // Registro sem pixel nao fala com a CAPI (ver temPixel).
+    funnels = funnels.filter(temPixel);
   } catch (e) {
     console.error('CAPI_IC_FALHOU', JSON.stringify({ etapa: 'funis', dominio, erro: String(e).slice(0, 200) }));
     return { enviados: 0, aceitos: 0 };
