@@ -2,7 +2,7 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O sentido inverso — subir o código antes deste SQL — é grave: o `vendas.js` roda `SELECT pr.send_to_tiktok ...` em toda venda com `productCode`, antes do `INSERT` em `sales`; o `SELECT` lança, o catch do webhook da PayT responde HTTP 200 e a PayT nunca re-tenta — 100% das vendas da PayT se perdem (sem linha em `sales`, sem backlog para o `reprocessa-capi.js`). A Digistore24 recebe 500 e re-tenta; e o `/collect` devolve 500 em todo clique (colunas `ttclid`/`ttp`). `TIKTOK_EVENTS_DESLIGADO=1` **não ajuda** neste incidente (o `SELECT` roda de qualquer forma): o único conserto é rodar o SQL imediatamente. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s. Rodar nesta ordem:
+1. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O sentido inverso — subir o código antes deste SQL — é grave: o `vendas.js` roda `SELECT pr.send_to_tiktok ...` em toda venda com `productCode`, antes do `INSERT` em `sales`; o `SELECT` lança, o catch do webhook da PayT responde HTTP 200 e a PayT nunca re-tenta — 100% das vendas da PayT se perdem (sem linha em `sales`, sem backlog para o `reprocessa-capi.js`). A Digistore24 recebe 500 e re-tenta; e o `/collect` devolve 500 em todo clique (colunas `ttclid`/`ttp`). `TIKTOK_EVENTS_DESLIGADO=1` **não ajuda** neste incidente (o `SELECT` roda de qualquer forma): o único conserto é rodar o SQL imediatamente. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s; o `GRANT SELECT` ao `dashboard_ro` é explícito porque o dashboard lista os pixels com o papel só-leitura (não dependa de `ALTER DEFAULT PRIVILEGES`). Rodar nesta ordem:
    ```bash
    node scripts/q.js "CREATE TABLE IF NOT EXISTS tiktok_pixels (id SERIAL PRIMARY KEY, domain TEXT NOT NULL, pixel_code TEXT NOT NULL, access_token TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (domain, pixel_code))"
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS ttclid TEXT, ADD COLUMN IF NOT EXISTS ttp TEXT"
@@ -12,13 +12,15 @@
    node scripts/q.js "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'meta'"
    node scripts/q.js "GRANT SELECT, INSERT, UPDATE ON tiktok_pixels TO dashboard_rw"
    node scripts/q.js "GRANT USAGE, SELECT ON SEQUENCE tiktok_pixels_id_seq TO dashboard_rw"
+   node scripts/q.js "GRANT SELECT ON tiktok_pixels TO dashboard_ro"
    ```
    Confira:
    ```bash
    node scripts/q.js "SELECT table_name, column_name FROM information_schema.columns WHERE (table_name, column_name) IN (('clicks','ttclid'),('clicks','ttp'),('products','send_to_tiktok'),('event_log','plataforma'))"
    node scripts/q.js "SELECT count(*) FROM tiktok_pixels"
+   node scripts/q.js "SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_name = 'tiktok_pixels' ORDER BY 1,2"
    ```
-   Esperado: 4 linhas, e `0`.
+   Esperado: 4 linhas, `0`, e os grants `dashboard_ro SELECT` e `dashboard_rw INSERT/SELECT/UPDATE`.
    Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart interrompe os ENVIOS à TikTok sem deploy; as colunas e a tabela podem ficar. Detalhes na seção "TikTok — eventos (pixel + Events API)", mais abaixo.
 2. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
    ```bash
