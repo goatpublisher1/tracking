@@ -7,10 +7,18 @@
    ```bash
    node scripts/q.js "ALTER TABLE funnels ALTER COLUMN pixel_id DROP NOT NULL"
    node scripts/q.js "ALTER TABLE funnels ALTER COLUMN capi_token DROP NOT NULL"
-   node scripts/q.js "SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'funnels' AND column_name IN ('pixel_id','capi_token')"
+   node scripts/q.js "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'funnels' AND column_name IN ('pixel_id','capi_token')"
+   node scripts/q.js "SELECT slug FROM funnels WHERE active AND (coalesce(trim(pixel_id),'')='' OR coalesce(trim(capi_token),'')='')"
    ```
 
-   Esperado: `is_nullable = YES` nas duas.
+   Esperado: `is_nullable = YES` e `data_type = text` nas duas (o dashboard grava `NULLIF($2,'')`,
+   que exige texto). A segunda consulta lista registros ativos que já estão sem pixel ou sem
+   token: hoje eles tentam a CAPI e falham (`CAPI_FALHOU`); com o código novo passam a ser
+   pulados como `sem_pixel` — confira se algum deveria ter token.
+
+   Ordem: SQL → deploy do **tracking** → deploy do **dashboard**. Com o tracking antigo no ar e
+   um registro sem pixel criado pelo dashboard novo, a venda continua gravada, mas cada uma gera
+   `CAPI_FALHOU` (POST para `/null/events`) até o tracking novo subir.
 
 2. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O sentido inverso — subir o código antes deste SQL — é grave: o `vendas.js` roda `SELECT pr.send_to_tiktok ...` em toda venda com `productCode`, antes do `INSERT` em `sales`; o `SELECT` lança, o catch do webhook da PayT responde HTTP 200 e a PayT nunca re-tenta — 100% das vendas da PayT se perdem (sem linha em `sales`, sem backlog para o `reprocessa-capi.js`). A Digistore24 recebe 500 e re-tenta; e o `/collect` devolve 500 em todo clique (colunas `ttclid`/`ttp`). `TIKTOK_EVENTS_DESLIGADO=1` **não ajuda** neste incidente (o `SELECT` roda de qualquer forma): o único conserto é rodar o SQL imediatamente. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s; o `GRANT SELECT` ao `dashboard_ro` é explícito porque o dashboard lista os pixels com o papel só-leitura (não dependa de `ALTER DEFAULT PRIVILEGES`). Rodar nesta ordem:
    ```bash
