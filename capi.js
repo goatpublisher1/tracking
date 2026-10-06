@@ -153,7 +153,14 @@ function clean(obj) {
   return out;
 }
 
+// Registro "com pixel" = pode falar com a CAPI. Desde que o pixel do Meta ficou opcional no
+// cadastro (funil so Google/TikTok, ou pixel cadastrado depois), pixel_id e capi_token podem
+// vir nulos ou vazios — e um token sem pixel, ou pixel sem token, tambem nao serve.
+function temPixel(f) {
+  return Boolean(f && String(f.pixel_id || '').trim() && String(f.capi_token || '').trim());
+}
+
 module.exports = {
-  sendPurchase, sendInitiateCheckout, sendEvent,
+  temPixel, sendPurchase, sendInitiateCheckout, sendEvent,
   buildPurchaseEvent, buildInitiateCheckoutEvent, fbcDe, hash,
 };

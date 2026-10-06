@@ -356,3 +356,28 @@ test('TikTok rejeita com HTTP 200 e code != 0: event_log grava status 0', async 
   assert.strictEqual(tt[0].params[3], 0);
   assert.ok(erros.some(e => e.includes('TIKTOK_FALHOU') && e.includes('40001')));
 });
+
+test('dominio ativo sem pixel: grava a venda, nao chama a Meta, marca sem_pixel e loga CAPI_SEM_PIXEL', async (t) => {
+  const capi = require('../capi');
+  let chamadas = 0;
+  t.mock.method(capi, 'sendPurchase', async () => { chamadas++; return { httpStatus: 200, response: {}, payload: {} }; });
+  const erroOriginal = console.error; const erros = [];
+  console.error = (...a) => erros.push(a.join(' '));
+  t.after(() => { console.error = erroOriginal; });
+  const semPixel = { id: 1, slug: 'novo-1', domain: 'x.com', pixel_id: null, capi_token: null, currency: 'BRL', active: true };
+  const calls = [];
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    if (text === 'SELECT funnel_id FROM store WHERE sck=$1') return { rows: [{ funnel_id: 1 }] };
+    if (text === 'SELECT * FROM funnels WHERE id=$1') return { rows: [semPixel] };
+    if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [semPixel] };
+    return { rows: [] };
+  } };
+  const r = await processarVenda(pool, { txId: 't8', sck: 'idx_1', paid: true, status: 'paid', value: 10 });
+  assert.strictEqual(chamadas, 0);
+  assert.strictEqual(r.motivo, 'sem_pixel');
+  assert.strictEqual(insertSalesArgs(calls)[17], 1);
+  const upd = calls.find(c => c.text.includes('UPDATE sales SET capi_response'));
+  assert.strictEqual(upd.params[0], '{"skipped":"sem_pixel"}');
+  assert.ok(erros.some(e => e.includes('CAPI_SEM_PIXEL')));
+});

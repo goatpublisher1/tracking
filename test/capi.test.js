@@ -218,3 +218,11 @@ test('sendEvent: corpo com data e token; test_event_code so quando ha valor nao 
   await sendEvent({ funnel: funnelX, event });
   assert.strictEqual(chamada.body.test_event_code, 'TEST123');
 });
+
+test('temPixel: so com pixel_id e capi_token preenchidos', () => {
+  const { temPixel } = require('../capi');
+  assert.strictEqual(temPixel({ pixel_id: '123', capi_token: 'tok' }), true);
+  for (const f of [{ pixel_id: null, capi_token: 'tok' }, { pixel_id: '', capi_token: 'tok' }, { pixel_id: '123', capi_token: null }, { pixel_id: '123', capi_token: '  ' }, {}]) {
+    assert.strictEqual(temPixel(f), false, JSON.stringify(f));
+  }
+});

@@ -5,7 +5,7 @@
 //  Uso: node scripts/reprocessa-capi.js [--dry]
 // =====================================================================
 const { Pool } = require('pg');
-const { sendPurchase } = require('../capi');
+const { sendPurchase, temPixel } = require('../capi');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const dry = process.argv.includes('--dry');
@@ -43,11 +43,13 @@ async function main() {
        JOIN funnels o ON o.domain = f.domain
        WHERE o.id = $1 AND f.active`, [v.funnel_id]);
     if (!fs.length) { console.warn('sem funil ativo', v.transaction_id); continue; }
+    const comPixel = fs.filter(temPixel);
+    if (!comPixel.length) { console.log(v.transaction_id, 'sem pixel no dominio'); continue; }
 
     // Pixels que ja receberam 200 ficam de fora: a dedupe da Meta por event_id vale 48h, e
     // fora dessa janela um reenvio conta duas vezes.
     const anteriores = pixelsComSucesso(v.capi_response);
-    const pendentes = fs.filter(f => !anteriores.has(String(f.pixel_id)));
+    const pendentes = comPixel.filter(f => !anteriores.has(String(f.pixel_id)));
     if (!pendentes.length) { console.log(v.transaction_id, 'todas as pixels ja receberam'); continue; }
 
     const { rows: st } = await pool.query('SELECT * FROM store WHERE sck=$1', [v.sck]);

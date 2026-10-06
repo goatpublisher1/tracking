@@ -3,7 +3,7 @@
 //  Recebe uma venda ja normalizada (ver payt.js / digistore24.js) e faz
 //  todo o trabalho de banco e de envio a Meta.
 // =====================================================================
-const { sendPurchase } = require('./capi');
+const { sendPurchase, temPixel } = require('./capi');
 const { sendCompletePayment } = require('./tiktok');
 
 async function processarVenda(pool, venda) {
@@ -68,11 +68,15 @@ async function processarVenda(pool, venda) {
   // `[funnel]`: quando o dominio nao tem mais nenhum funil ativo, o funil resolvido pelo
   // store/produto e um desativado — a venda continua gravada com o funnel_id dele (atribuicao
   // no dashboard), mas pixel desligado nao recebe CAPI.
+  // Registro ativo SEM pixel (funil so Google/TikTok, ou pixel ainda nao cadastrado) tambem
+  // fica de fora da CAPI — mas e um caso distinto de "sem funil ativo": a venda e normal.
   let funnels = [];
+  let ativosSemPixel = false;
   if (funnel) {
     const all = await pool.query(
       'SELECT * FROM funnels WHERE active AND domain = $1', [funnel.domain]);
-    funnels = all.rows;
+    funnels = (all.rows || []).filter(temPixel);
+    ativosSemPixel = (all.rows || []).length > 0 && funnels.length === 0;
   }
 
   // ---- dados do browser gravados no checkout
@@ -217,6 +221,13 @@ async function processarVenda(pool, venda) {
       `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
       ['{"skipped":"produto_nao_envia_meta"}', txId]);
     motivoMeta = 'produto_nao_envia_meta';
+  } else if (paid && ativosSemPixel) {
+    // prefixo fixo, greppavel: venda paga que nao foi a Meta por falta de pixel no dominio.
+    console.error('CAPI_SEM_PIXEL', JSON.stringify({ tx: txId, funil: funnel?.slug || null, dominio: funnel?.domain || null }));
+    await pool.query(
+      `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
+      ['{"skipped":"sem_pixel"}', txId]);
+    motivoMeta = 'sem_pixel';
   } else if (paid && !funnels.length) {
     await pool.query(
       `UPDATE sales SET capi_response=$1 WHERE transaction_id=$2`,
