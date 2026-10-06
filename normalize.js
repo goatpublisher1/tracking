@@ -70,8 +70,8 @@ function normalizeUtms(raw = {}) {
 
 // Identificadores de clique do Google Ads. gclid vem no desktop/Android; gbraid e
 // wbraid no iOS (App Tracking Transparency). ttclid e o id de clique do TikTok Ads,
-// na URL de entrada. Nenhum e usado pelo servidor — sao gravados em clicks para o
-// dashboard montar o upload de conversoes.
+// na URL de entrada. Todos sao gravados em clicks; gclid/gbraid/wbraid so servem ao
+// upload de conversoes do dashboard, e o ttclid tambem vai ao TikTok (tiktok.js).
 const CLICK_KEYS = ['gclid', 'gbraid', 'wbraid', 'ttclid'];
 function clickIds(b) {
   const out = {};

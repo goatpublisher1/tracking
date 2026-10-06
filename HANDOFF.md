@@ -2,17 +2,24 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s. Rodar nesta ordem:
+1. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O sentido inverso — subir o código antes deste SQL — é grave: o `vendas.js` roda `SELECT pr.send_to_tiktok ...` em toda venda com `productCode`, antes do `INSERT` em `sales`; o `SELECT` lança, o catch do webhook da PayT responde HTTP 200 e a PayT nunca re-tenta — 100% das vendas da PayT se perdem (sem linha em `sales`, sem backlog para o `reprocessa-capi.js`). A Digistore24 recebe 500 e re-tenta; e o `/collect` devolve 500 em todo clique (colunas `ttclid`/`ttp`). `TIKTOK_EVENTS_DESLIGADO=1` **não ajuda** neste incidente (o `SELECT` roda de qualquer forma): o único conserto é rodar o SQL imediatamente. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s. Rodar nesta ordem:
    ```bash
    node scripts/q.js "CREATE TABLE IF NOT EXISTS tiktok_pixels (id SERIAL PRIMARY KEY, domain TEXT NOT NULL, pixel_code TEXT NOT NULL, access_token TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (domain, pixel_code))"
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS ttclid TEXT, ADD COLUMN IF NOT EXISTS ttp TEXT"
-   node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_tiktok BOOLEAN NOT NULL DEFAULT true"
+   node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_tiktok BOOLEAN NOT NULL DEFAULT false"
+   # rodar UMA vez, logo após o ALTER — depois que o dashboard passar a editar a flag, não repetir
    node scripts/q.js "UPDATE products SET send_to_tiktok = COALESCE(send_to_meta, true)"
    node scripts/q.js "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'meta'"
    node scripts/q.js "GRANT SELECT, INSERT, UPDATE ON tiktok_pixels TO dashboard_rw"
    node scripts/q.js "GRANT USAGE, SELECT ON SEQUENCE tiktok_pixels_id_seq TO dashboard_rw"
    ```
-   Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart desliga os envios à TikTok sem deploy; as colunas e a tabela podem ficar. Detalhes na seção "TikTok — eventos (pixel + Events API)", mais abaixo.
+   Confira:
+   ```bash
+   node scripts/q.js "SELECT table_name, column_name FROM information_schema.columns WHERE (table_name, column_name) IN (('clicks','ttclid'),('clicks','ttp'),('products','send_to_tiktok'),('event_log','plataforma'))"
+   node scripts/q.js "SELECT count(*) FROM tiktok_pixels"
+   ```
+   Esperado: 4 linhas, e `0`.
+   Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart interrompe os ENVIOS à TikTok sem deploy; as colunas e a tabela podem ficar. Detalhes na seção "TikTok — eventos (pixel + Events API)", mais abaixo.
 2. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
    ```bash
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS gclid TEXT, ADD COLUMN IF NOT EXISTS gbraid TEXT, ADD COLUMN IF NOT EXISTS wbraid TEXT"
@@ -588,7 +595,7 @@ O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e
 O tracking manda dois eventos à Events API da TikTok: `InitiateCheckout` (disparado pelo `/collect`, em `ic.js`) e `CompletePayment` (disparado pelos webhooks de venda, em `vendas.js`, só para produtos com `products.send_to_tiktok = true`). O pixel é resolvido pelo domínio do funil em `tiktok_pixels`. O SQL é o item 1 do checklist pré-deploy, no topo deste arquivo.
 
 **Variáveis (serviço de tracking no Coolify, com *Available at Runtime* marcado):**
-- `TIKTOK_TEST_EVENT_CODE` (opcional): código da aba *Test Events* do Events Manager; com ele definido, todo evento sai com `test_event_code`. **Afeta TODOS os pixels TikTok, de todos os funis.** Os eventos de teste não otimizam nada e o `vendas.js` os marca como enviados, então as vendas daquela janela se perdem para a otimização. Em produção fica **vazio**; use por minutos e apague logo depois, com restart.
+- `TIKTOK_TEST_EVENT_CODE` (opcional): código da aba *Test Events* do Events Manager; com ele definido, todo evento sai com `test_event_code`. **Afeta TODOS os pixels TikTok, de todos os funis.** Os eventos de teste ficam registrados no `event_log` como aceitos (status 200) e não contam para a otimização, e nada reenvia vendas da TikTok — então as vendas daquela janela se perdem para a otimização. Em produção fica **vazio**; use por minutos e apague logo depois, com restart.
 - `TIKTOK_EVENTS_DESLIGADO` (opcional): `1` desliga `InitiateCheckout` e `CompletePayment` da TikTok. É o kill switch, mas só vale depois de **reiniciar** o serviço.
 
 **O que o dashboard cadastra:** uma linha em `tiktok_pixels` por pixel (domínio, `pixel_code` e o `access_token` gerado em Events Manager › Configurações do pixel › Events API). O token é por pixel e fica na tabela; não vai para variável de ambiente nem para o chat.

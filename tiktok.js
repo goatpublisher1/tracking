@@ -25,12 +25,12 @@ function segundos(d) {
 }
 
 // identificadores do navegador, comuns aos dois eventos
-function userBase({ store, click, sck }) {
+function userBase({ store, click, sck, ipFallback }) {
   return {
     external_id: sck ? hash(sck) : undefined,
     ttclid: click?.ttclid || undefined,
     ttp: click?.ttp || undefined,
-    ip: store?.ip_override || click?.ip || undefined,
+    ip: store?.ip_override || click?.ip || ipFallback || undefined,
     user_agent: store?.user_agent || click?.user_agent || undefined,
   };
 }
@@ -39,7 +39,7 @@ function buildCompletePaymentEvent({ pixel, sale, store, click }) {
   const user = clean({
     email: hash(sale.customer_email),
     phone: hash(telefoneE164(sale.customer_phone)),
-    ...userBase({ store, click, sck: sale.sck || store?.sck }),
+    ...userBase({ store, click, sck: sale.sck || store?.sck, ipFallback: sale.ip }),
   });
   const properties = clean({
     value: Number(sale.value) || 0,

@@ -41,6 +41,12 @@ test('CompletePayment: sem e-mail/telefone/ttclid os campos ficam ausentes, nao 
   assert.strictEqual(ev.properties.contents, undefined);
 });
 
+test('CompletePayment: IP cai para o da venda so sem store/click; click vence', () => {
+  const sale = { transaction_id: 'T3', value: 10, sck: 'idx_abc', ip: '7.7.7.7' };
+  assert.strictEqual(buildCompletePaymentEvent({ pixel, sale, store: null, click: null }).user.ip, '7.7.7.7');
+  assert.strictEqual(buildCompletePaymentEvent({ pixel, sale, store: null, click }).user.ip, '1.2.3.4');
+});
+
 test('IC: event_id = sck, user do clique, sem properties', () => {
   const ev = buildInitiateCheckoutEvent({ pixel, click });
   assert.strictEqual(ev.event, 'InitiateCheckout');
