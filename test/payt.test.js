@@ -129,3 +129,14 @@ test('statusBruto guarda o que a PayT mandou antes de virar paid (para o log de 
   assert.strictEqual(v.statusBruto, 'approved');
   assert.strictEqual(normalizarPayt(payload).statusBruto, 'paid');
 });
+
+test('paid so vence quando o payment_status tambem diz pago (paid/approved) ou nao vem; o resto fica como veio', () => {
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'approved' } }).status, 'paid');
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: '' } }).status, 'paid');
+  assert.strictEqual(normalizarPayt({ status: 'paid' }).status, 'paid');
+  for (const outro of ['canceled', 'refused', 'expired', 'refunded', 'chargeback', 'waiting_payment']) {
+    const v = normalizarPayt({ status: 'paid', transaction: { payment_status: outro } });
+    assert.strictEqual(v.status, outro, outro);
+    assert.strictEqual(v.paid, true, 'paid continua o OR de sempre; quem barra o envio e o gate do vendas.js');
+  }
+});

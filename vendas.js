@@ -5,7 +5,11 @@
 // =====================================================================
 const { sendPurchase, temPixel } = require('./capi');
 const { sendCompletePayment } = require('./tiktok');
-const { normalizeUtms } = require('./normalize');
+const { normalizeUtms, idNumerico } = require('./normalize');
+
+// Id de campanha/conjunto/anuncio limpo (numerico ou null). String(): o que vem do banco pode nao
+// ser texto, e nada no caminho do webhook pode lancar antes do INSERT.
+const idLimpo = (v) => (v == null ? null : idNumerico(String(v)));
 
 // Upsert da venda. Constante exportada para o scripts/verifica-sql.js conferir o texto com EXPLAIN
 // no banco de producao antes do deploy, sem gravar nada (coluna faltando = toda venda perdida).
@@ -41,25 +45,27 @@ const SQL_UPSERT_VENDA = `INSERT INTO sales (transaction_id, event_id, sck, src,
      -- campanha. Com COALESCE coluna a coluna, a utm_source do clique sem campanha ficava ao
      -- lado do campaign_id do outro. Venda com campanha A nunca recebe o conjunto/anuncio de
      -- outra campanha (nem de fonte sem campanha); da mesma campanha, completa o que faltava.
+     -- Campanha gravada nao numerica ('Teste', '{campaignid}' de antes do normalize.js novo) conta
+     -- como ausente: a primeira campanha de verdade substitui as cinco.
      utm_source = CASE
-       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.utm_source
-       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_source
+       WHEN sales.campaign_id ~ '^\\d{5,}$' AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.utm_source
+       WHEN (sales.campaign_id ~ '^\\d{5,}$') IS NOT TRUE AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_source
        ELSE COALESCE(sales.utm_source, EXCLUDED.utm_source) END,
      utm_campaign = CASE
-       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.utm_campaign
-       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_campaign
+       WHEN sales.campaign_id ~ '^\\d{5,}$' AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.utm_campaign
+       WHEN (sales.campaign_id ~ '^\\d{5,}$') IS NOT TRUE AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_campaign
        ELSE COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign) END,
      campaign_id = CASE
-       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.campaign_id
-       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.campaign_id
+       WHEN sales.campaign_id ~ '^\\d{5,}$' AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.campaign_id
+       WHEN (sales.campaign_id ~ '^\\d{5,}$') IS NOT TRUE AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.campaign_id
        ELSE COALESCE(sales.campaign_id, EXCLUDED.campaign_id) END,
      adset_id = CASE
-       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.adset_id
-       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.adset_id
+       WHEN sales.campaign_id ~ '^\\d{5,}$' AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.adset_id
+       WHEN (sales.campaign_id ~ '^\\d{5,}$') IS NOT TRUE AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.adset_id
        ELSE COALESCE(sales.adset_id, EXCLUDED.adset_id) END,
      ad_id = CASE
-       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.ad_id
-       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.ad_id
+       WHEN sales.campaign_id ~ '^\\d{5,}$' AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.ad_id
+       WHEN (sales.campaign_id ~ '^\\d{5,}$') IS NOT TRUE AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.ad_id
        ELSE COALESCE(sales.ad_id, EXCLUDED.ad_id) END,
      utm_url = COALESCE(sales.utm_url, EXCLUDED.utm_url),
      city = COALESCE(sales.city, EXCLUDED.city),
@@ -110,13 +116,35 @@ const SQL_HERDA_FUNIL_CLIQUE = `UPDATE clicks c SET funnel_id = fd.id
     WHERE c.funnel_id IS NULL AND c.created_at > now() - interval '7 days'
       AND fd.dominio = regexp_replace(substring(lower(c.landing_url) from '^[a-z][a-z0-9+.-]*://([^/:?#]+)'), '^(track\\.)?(www\\.)?', '')`;
 
+// Venda gravada ANTES de o produto ser cadastrado ficou com offer_type nulo (ou o que a
+// plataforma mandou). O cadastro do produto e a fonte da verdade — no webhook ele ja sobrescreve
+// o tipo —, entao as vendas antigas herdam o tipo tambem; e o funil, como nos dois SQL acima.
+// Um try por UPDATE, cada um com o seu log: a falha de um nao pula os outros, e o log diz qual.
+async function herdarDoProduto(pool) {
+  const passos = [
+    ['OFFER_TYPE_HERDADO', `UPDATE sales s SET offer_type = p.offer_type
+         FROM products p
+        WHERE p.product_code = s.product_code AND p.active
+          AND s.offer_type IS DISTINCT FROM p.offer_type`],
+    ['FUNNEL_ID_HERDADO', SQL_HERDA_FUNIL_VENDA],
+    ['FUNNEL_CLIQUE_HERDADO', SQL_HERDA_FUNIL_CLIQUE],
+  ];
+  for (const [rotulo, sql] of passos) {
+    try {
+      const r = await pool.query(sql);
+      if (r.rowCount) console.log(rotulo, r.rowCount);
+    } catch (err) { console.error(rotulo + '_ERRO', err); }
+  }
+}
+
 async function processarVenda(pool, venda) {
   const { txId, sck, paid, value, total } = venda;
 
   // ---- venda-mae: upsell e order bump chegam sem sck e sem utm (a plataforma cobra sem passar
   // pelo checkout de novo) e caiam em "Sem origem". A mae e quem passou pelo clique: na PayT o
   // upsell traz o transaction_id dela em upsell_from; na Digistore24 todas as vendas do pedido
-  // trazem o mesmo order_id em upsell_from. Prefere a irma com campanha, depois a mais antiga.
+  // trazem o mesmo order_id em upsell_from. Prefere a irma com campanha (id numerico: 'Teste' e
+  // '{campaignid}' gravados antes nao contam), depois a mais antiga.
   // try: nada aqui pode impedir o INSERT da venda.
   let mae = null;
   if (venda.upsellFrom) {
@@ -124,7 +152,7 @@ async function processarVenda(pool, venda) {
       const m = await pool.query(
         `SELECT sck, utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id FROM sales
           WHERE transaction_id <> $1 AND (transaction_id = $2 OR upsell_from = $2)
-          ORDER BY (campaign_id IS NOT NULL) DESC, created_at ASC LIMIT 1`, [txId, venda.upsellFrom]);
+          ORDER BY (campaign_id ~ '^\\d{5,}$') IS TRUE DESC, created_at ASC LIMIT 1`, [txId, venda.upsellFrom]);
       mae = m.rows[0] || null;
     } catch (e) {
       console.warn('VENDA_MAE_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
@@ -194,9 +222,11 @@ async function processarVenda(pool, venda) {
     }
   }
   // "Nao cadastrado = envia" vale para a venda principal. Upsell/order bump nao cadastrado (achou
-  // a mae) nao vai para a Meta: sem cadastro nao ha send_to_meta para respeitar, e herdar o sck da
-  // mae nao pode fazer a venda filha inflar a otimizacao. TikTok ja fica fora (nao cadastrado).
-  if (!produtoCadastrado && mae) sendToMeta = false;
+  // a mae e nao tem sck proprio) nao vai para a Meta: sem cadastro nao ha send_to_meta para
+  // respeitar, e herdar o sck da mae nao pode fazer a venda filha inflar a otimizacao. O `!sck`
+  // importa na Digistore24: toda venda traz o order_id em upsell_from, entao a principal tambem
+  // acha "mae" (uma irma) — mas chega com o sck dela. TikTok ja fica fora (nao cadastrado).
+  if (!produtoCadastrado && mae && !sck) sendToMeta = false;
 
   // Terminal, e por isso vem depois do bloco acima: comissao de produto de
   // terceiro nao vai para a Meta nem se alguem cadastrar esse produto com
@@ -244,13 +274,14 @@ async function processarVenda(pool, venda) {
     const c = await pool.query(
       'SELECT * FROM clicks WHERE sck=$1 ORDER BY created_at DESC LIMIT 1', [sckEfetivo]);
     click = c.rows[0] || null;
-    // O clique mais recente pode ser uma volta sem anuncio (aba reaberta, link da bio) depois do
-    // clique pago, e apagava a campanha da venda. Para a atribuicao vale o ultimo clique COM
-    // campanha ate a venda (venda nova: agora); o mais recente continua sendo o do navegador na CAPI.
-    if (click && !click.campaign_id) {
+    // O clique mais recente continua sendo o do navegador na CAPI, mas nao o da atribuicao: pode
+    // ser uma volta sem anuncio (aba reaberta, link da bio) depois do clique pago, ou — num reenvio
+    // do webhook dias depois — um clique de outra campanha DEPOIS da venda. Para a atribuicao vale
+    // sempre o ultimo clique com campanha (id numerico) ate a hora da venda (venda nova: agora).
+    if (click) {
       try {
         const cc = await pool.query(
-          `SELECT * FROM clicks WHERE sck=$1 AND campaign_id IS NOT NULL
+          `SELECT * FROM clicks WHERE sck=$1 AND campaign_id ~ '^\\d{5,}$'
               AND created_at <= COALESCE($2::timestamptz, now())
             ORDER BY created_at DESC LIMIT 1`, [sckEfetivo, antes?.created_at ?? null]);
         cliqueComCampanha = cc.rows[0] || null;
@@ -259,6 +290,10 @@ async function processarVenda(pool, venda) {
       }
     }
   }
+  // Reserva da atribuicao (sem campanha em lugar nenhum): o clique mais recente, so se for de
+  // antes da venda gravada.
+  const cliqueAteVenda = click && (!antes?.created_at || new Date(click.created_at) <= new Date(antes.created_at))
+    ? click : null;
 
   // O IPN da Digistore24 nao tem campo de src (sid1 e do postback de afiliado),
   // entao venda.src vem null nessa plataforma. O /collect ja gravou store.src a
@@ -270,8 +305,11 @@ async function processarVenda(pool, venda) {
 
   // Atribuicao, nesta ordem: (1) utm_* da URL do proprio checkout com campanha — e o anuncio que
   // trouxe ESTA compra, enquanto o clique do mesmo sck pode ser de dias antes, de outra campanha
-  // (so a PayT manda; a Digistore24 nao tem utm no IPN); (2) ultimo clique do sck com campanha;
-  // (3) venda-mae com campanha (upsell); (4) ultimo clique; (5) utm_* da URL sem campanha.
+  // (so a PayT manda; a Digistore24 nao tem utm no IPN); (2) ultimo clique do sck com campanha,
+  // ate a venda; (3) venda-mae com campanha (upsell); (4) ultimo clique ate a venda; (5) utm_* da
+  // URL sem campanha. "Com campanha" = id numerico em todo lugar: 'Teste' e '{campaignid}'
+  // gravados antes do normalize.js novo nao contam, e os tres ids saem limpos (nao numerico vira
+  // null, ::fbclid colado sai), como o normalize.js faz no clique.
   // try: decodeURIComponent lanca com "%" solto, e nada aqui pode impedir o INSERT da venda.
   let daUrl = null;
   try {
@@ -279,16 +317,16 @@ async function processarVenda(pool, venda) {
   } catch (e) {
     console.warn('UTM_DA_URL_INVALIDA', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
   }
-  const comCampanha = (x) => (x && x.campaign_id ? x : null);
-  const atrib = comCampanha(daUrl) || comCampanha(cliqueComCampanha) || comCampanha(click)
-    || comCampanha(mae) || click || daUrl || null;
+  const comCampanha = (x) => (x && idLimpo(x.campaign_id) ? x : null);
+  const atrib = comCampanha(daUrl) || comCampanha(cliqueComCampanha) || comCampanha(mae)
+    || cliqueAteVenda || daUrl || null;
 
   const retorno = await pool.query(SQL_UPSERT_VENDA,
     [txId, 'purchase_' + txId, sckEfetivo, srcFinal, venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,
-     atrib?.utm_source, atrib?.utm_campaign, atrib?.campaign_id,
-     atrib?.adset_id, atrib?.ad_id, funnel ? funnel.id : null, offerType,
+     atrib?.utm_source, atrib?.utm_campaign, idLimpo(atrib?.campaign_id),
+     idLimpo(atrib?.adset_id), idLimpo(atrib?.ad_id), funnel ? funnel.id : null, offerType,
      venda.paymentMethod, venda.paidAt, venda.upsellFrom,
      (store?.city || venda.city || null), (store?.state || venda.state || null),
      (store?.country || venda.country || null),
@@ -450,4 +488,4 @@ async function enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, t
   }
 }
 
-module.exports = { processarVenda, SQL_UPSERT_VENDA, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE };
+module.exports = { processarVenda, herdarDoProduto, SQL_UPSERT_VENDA, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE };

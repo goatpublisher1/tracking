@@ -14,7 +14,7 @@ const { normalizeUtms, clickIds, ttpDe } = require('./normalize');
 const { enviarIC, enviarICTikTok } = require('./ic');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
-const { processarVenda, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE } = require('./vendas');
+const { processarVenda, herdarDoProduto } = require('./vendas');
 const { varianteDaAssinatura, normalizarDigistore } = require('./digistore24');
 const { normalizarAfiliado } = require('./digistore24-afiliado');
 
@@ -35,26 +35,10 @@ pool.query('ALTER TABLE sales ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMPTZ')
 pool.query('ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT')
   .catch((err) => console.error('SCHEMA_PAGO_EM', err));
 
-// Venda gravada ANTES de o produto ser cadastrado ficou com offer_type nulo (ou o que a
-// plataforma mandou). O cadastro do produto e a fonte da verdade — em vendas.js ele ja
-// sobrescreve o tipo na hora do webhook —, entao aqui as vendas antigas herdam o tipo
-// tambem. Roda no boot e de hora em hora; e um UPDATE que nao faz nada quando esta tudo certo.
-async function herdarTipoDoProduto() {
-  try {
-    const r = await pool.query(
-      `UPDATE sales s SET offer_type = p.offer_type
-         FROM products p
-        WHERE p.product_code = s.product_code AND p.active
-          AND s.offer_type IS DISTINCT FROM p.offer_type`);
-    if (r.rowCount) console.log('OFFER_TYPE_HERDADO', r.rowCount);
-    // Os dois UPDATEs abaixo moram em vendas.js para o scripts/verifica-sql.js conferir o texto
-    // com EXPLAIN antes do deploy (este arquivo sobe o servidor e nao pode ser importado).
-    const f = await pool.query(SQL_HERDA_FUNIL_VENDA);
-    if (f.rowCount) console.log('FUNNEL_ID_HERDADO', f.rowCount);
-    const c = await pool.query(SQL_HERDA_FUNIL_CLIQUE);
-    if (c.rowCount) console.log('FUNNEL_CLIQUE_HERDADO', c.rowCount);
-  } catch (err) { console.error('OFFER_TYPE_HERDADO_ERRO', err); }
-}
+// Backfills horarios (tipo da oferta e funil das vendas pelo produto; funil dos cliques pelo
+// dominio): moram em vendas.js, junto do SQL que o scripts/verifica-sql.js confere. Roda no boot
+// e de hora em hora; nao faz nada quando esta tudo certo.
+const herdarTipoDoProduto = () => herdarDoProduto(pool);
 herdarTipoDoProduto();
 setInterval(herdarTipoDoProduto, 60 * 60 * 1000).unref();
 process.on('unhandledRejection', (err) => console.error('UNHANDLED_REJECTION', err));

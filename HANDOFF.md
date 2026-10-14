@@ -2,23 +2,43 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Atribuição (2026-10-14) — ANTES do deploy do tracking.** O INSERT de toda venda passa a gravar `sales.pago_em` e `sales.utm_url`; sem as colunas, toda venda falha ao gravar (a PayT recebe 200 e não reenvia: venda perdida; a Digistore24 recebe 500 e reenvia). O boot também roda o `ALTER`, mas não dá para depender dele.
-   - **a.** O `ALTER` à mão:
+1. **Atribuição (2026-10-14) — ANTES do merge desta branch (merge = deploy do tracking).** O INSERT de toda venda passa a gravar `sales.pago_em` e `sales.utm_url`; sem as colunas, toda venda falha ao gravar (a PayT recebe 200 e não reenvia: venda perdida; a Digistore24 recebe 500 e reenvia). O boot também roda o `ALTER`, mas não dá para depender dele. Os itens 2–9 abaixo são de deploys anteriores e já estão em produção: os `ALTER … IF NOT EXISTS` podem rodar de novo sem efeito; os dois `UPDATE products …` (itens 3 e 4) **não**.
+   - **a.** O `ALTER` à mão, com limite de espera pelo lock (sem ele, o `ALTER` fica na fila atrás de uma consulta longa do dashboard e trava os INSERTs de venda que chegam depois dele). Um comando só: o `q.js` manda a string inteira, e duas instruções separadas por `;` passam juntas. A saída mostra `undefined - linhas afetadas: undefined` (o `q.js` não imprime resultado de duas instruções); quem confere é o passo b. Se der `canceling statement due to lock timeout`, rode de novo em outro momento.
      ```bash
-     node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
+     node scripts/q.js "SET lock_timeout='5s'; ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
      ```
-   - **b.** `node scripts/verifica-sql.js` tem que terminar em `OK`. Só manda `SELECT` e `EXPLAIN` (nada é gravado): confere as duas colunas, o upsert da venda com 28 parâmetros de exemplo e os dois backfills horários no banco de verdade. Qualquer `ERRO`/`FALHOU`: não suba.
+   - **b.** `scripts/verifica-sql.js` tem que terminar em `OK`. **Antes do merge ele ainda não existe no container de produção**: rode de um checkout local desta branch, com o `DATABASE_URL` apontando para o Postgres de produção pelo túnel SSH (o mesmo que você abre para consultar o banco do tracking):
+     ```bash
+     git checkout feat/auditoria-atribuicao && npm ci
+     DATABASE_URL="postgresql://<usuario>:<senha>@localhost:<porta do túnel>/<banco>" node scripts/verifica-sql.js
+     ```
+     Só manda `SELECT` e `EXPLAIN` (nada é gravado): confere as duas colunas, o upsert da venda com 28 parâmetros de exemplo e os dois backfills horários no banco de verdade. Qualquer `ERRO`/`FALHOU`: não faça o merge. Depois do deploy, confira de novo de dentro do container: `node scripts/verifica-sql.js`.
    - **c.** Rodar e colar o resultado na conversa:
      ```bash
      node scripts/q.js "SELECT status, count(*) FROM sales WHERE plataforma='payt' AND capi_sent IS TRUE AND status NOT IN ('paid','refunded','chargeback') GROUP BY 1"
-     node scripts/q.js "SELECT product_code, product_name, count(*) FROM sales s WHERE upsell_from IS NOT NULL AND created_at > now()-interval '30 days' AND NOT EXISTS (SELECT 1 FROM products p WHERE p.product_code=s.product_code AND p.active) GROUP BY 1,2"
+     node scripts/q.js "SELECT product_code, product_name, count(*) FROM sales s WHERE plataforma='payt' AND upsell_from IS NOT NULL AND created_at > now()-interval '30 days' AND NOT EXISTS (SELECT 1 FROM products p WHERE p.product_code=s.product_code AND p.active) GROUP BY 1,2"
      ```
-     A primeira mostra venda da PayT que foi à Meta com status gravado diferente de pago (o caso que o `payt.js` passa a gravar como `paid`). A segunda lista upsell/order bump com produto não cadastrado nos últimos 30 dias: depois do deploy eles **param de ir à Meta**; cadastre o produto (com `send_to_meta`) se algum deve ir.
-   - **d.** Opcional, fora do horário de pico (a busca da venda-mãe roda em todo IPN da Digistore24):
+     A primeira mostra venda da PayT que foi à Meta com status gravado diferente de pago (o caso `approved` que o `payt.js` passa a gravar como `paid`). A segunda lista upsell/order bump da PayT com produto não cadastrado nos últimos 30 dias: depois do deploy eles **param de ir à Meta** (só quando chegam sem `sck` próprio); cadastre o produto (com `send_to_meta`) se algum deve ir. Fica só na PayT porque na Digistore24 **toda** venda tem `upsell_from` (o `order_id`), e a principal chega com o `sck` dela: ela não muda.
+   - **d.** O que muda no primeiro boot e com a regra nova (colar também):
+     ```bash
+     node scripts/q.js "SELECT count(*) AS vendas, count(*) FILTER (WHERE s.status='paid') AS pagas, sum(s.value) FILTER (WHERE s.status='paid') AS receita FROM sales s WHERE s.funnel_id IS NULL AND EXISTS (SELECT 1 FROM products p JOIN funnels f ON f.slug = p.funnel_slug WHERE p.product_code = s.product_code AND p.active)"
+     node scripts/q.js "SELECT count(*) AS cliques FROM clicks c WHERE c.funnel_id IS NULL AND c.created_at > now() - interval '7 days' AND EXISTS (SELECT 1 FROM funnels f WHERE f.active AND f.domain IS NOT NULL AND regexp_replace(lower(f.domain), '^(track\.)?(www\.)?', '') = regexp_replace(substring(lower(c.landing_url) from '^[a-z][a-z0-9+.-]*://([^/:?#]+)'), '^(track\.)?(www\.)?', ''))"
+     node scripts/q.js "SELECT count(*) AS vendas, sum(value) AS receita FROM (SELECT value, campaign_id, trim(split_part(CASE WHEN cardinality(p) = 5 AND lower(p[2]) = 'paid' THEN p[3] WHEN cardinality(p) IN (7,8) THEN p[5] END, '::', 1)) AS da_url FROM (SELECT value, campaign_id, string_to_array(src, '|') AS p FROM sales WHERE plataforma='payt' AND status='paid' AND created_at > now() - interval '30 days' AND campaign_id IS NOT NULL) a) v WHERE da_url ~ '^[0-9]{5,}$' AND da_url <> campaign_id"
+     ```
+     A primeira conta as vendas sem funil que o backfill horário vai preencher pelo produto no primeiro boot (agora também de funil desativado). A segunda, os cliques sem funil dos últimos 7 dias que ganham funil pelo domínio da `landing_url`. A terceira estima quantas vendas pagas da PayT por mês trocam de campanha com "URL do checkout primeiro": a campanha do `src` (o que o header propagou para o checkout) é outra que a gravada. As vendas já gravadas não mudam; a conta é do que vai acontecer daqui para frente.
+   - **e.** Opcional, fora do horário de pico (a busca da venda-mãe roda em todo IPN da Digistore24):
      ```bash
      node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS sales_upsell_from_idx ON sales (upsell_from)"
      ```
-   - **e.** Depois do deploy, acompanhar nos logs: `payt webhook error` e `DIGISTORE_GRAVACAO_FALHOU` (venda que não gravou), `SCHEMA_PAGO_EM` (o ALTER do boot falhou), `VENDA_MAE_FALHOU` e `VENDA_ANTES_FALHOU` (leitura nova falhou; a venda seguiu como antes), `PAID_STATUS_DIVERGENTE` e `STATUS_MANTIDO` (sinais; ver a seção "Atribuição (2026-10-14)").
+   - **f.** Depois do deploy:
+     - Na primeira venda real, o teste de fumaça. A venda paga nova tem `tem_pago_em = true`; a da PayT com `utm_*` no checkout, `tem_utm_url = true` (Digistore24: `false`, ela não manda):
+       ```bash
+       node scripts/q.js "SELECT transaction_id, status, pago_em IS NOT NULL AS tem_pago_em, utm_url IS NOT NULL AS tem_utm_url, capi_sent FROM sales ORDER BY created_at DESC LIMIT 5"
+       ```
+     - Logs a acompanhar: `payt webhook error` e `DIGISTORE_GRAVACAO_FALHOU` (venda que não gravou), `SCHEMA_PAGO_EM` (o ALTER do boot falhou), `VENDA_MAE_FALHOU`, `VENDA_ANTES_FALHOU` e `CLIQUE_COM_CAMPANHA_FALHOU` (leitura nova falhou; a venda seguiu como antes), `UTM_DA_URL_INVALIDA` (utm_* da PayT que não deu para ler), `FUNNEL_ID_HERDADO_ERRO` e `FUNNEL_CLIQUE_HERDADO_ERRO` (backfill horário de funil falhou), `PAID_STATUS_DIVERGENTE` e `STATUS_MANTIDO` (sinais; ver a seção "Atribuição (2026-10-14)").
+     - `reprocessa-capi.js`: a primeira vez depois do deploy, **sempre com `--dry`** (`node scripts/reprocessa-capi.js --dry`). Vendas `funnel_nao_resolvido` que o backfill deu funil voltam a ser candidatas; confira a lista antes de mandar.
+     - Google: upsell agora herda o `sck` da venda-mãe, então um upsell cadastrado com `send_to_google = true` passa a ser elegível para o arquivo de conversões do Google. Deixe `send_to_google` desligado nas ofertas que não são a principal.
+   - **g.** Rollback: redeploy da imagem anterior. Ela não nomeia `pago_em` nem `utm_url` no INSERT e ignora as colunas; elas podem ficar.
 2. **Rodar o SQL do pixel opcional — ANTES do deploy do tracking e do dashboard.** O dashboard passa a cadastrar funil sem pixel do Meta (`pixel_id`/`capi_token` nulos); com NOT NULL o INSERT falha. Seguro para o código atual: só afrouxa a restrição, nenhuma linha muda.
 
    ```bash
@@ -42,7 +62,7 @@
    node scripts/q.js "CREATE TABLE IF NOT EXISTS tiktok_pixels (id SERIAL PRIMARY KEY, domain TEXT NOT NULL, pixel_code TEXT NOT NULL, access_token TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (domain, pixel_code))"
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS ttclid TEXT, ADD COLUMN IF NOT EXISTS ttp TEXT"
    node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_tiktok BOOLEAN NOT NULL DEFAULT false"
-   # rodar UMA vez, logo após o ALTER — depois que o dashboard passar a editar a flag, não repetir
+   # já aplicado em produção — não rode de novo (rodava UMA vez, logo após o ALTER; hoje o dashboard edita a flag)
    node scripts/q.js "UPDATE products SET send_to_tiktok = COALESCE(send_to_meta, true)"
    node scripts/q.js "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'meta'"
    node scripts/q.js "GRANT SELECT, INSERT, UPDATE ON tiktok_pixels TO dashboard_rw"
@@ -70,6 +90,7 @@
    dashboard):
    ```bash
    node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_google BOOLEAN NOT NULL DEFAULT true"
+   # já aplicado em produção — não rode de novo (sobrescreveria o send_to_google editado no dashboard)
    node scripts/q.js "UPDATE products SET send_to_google = COALESCE(send_to_meta, true)"
    ```
    Rollback: `ALTER TABLE products DROP COLUMN send_to_google`.
@@ -670,9 +691,9 @@ Padrão: 30 dias (`--dias N`, até 90; o backup cobre 91). Rodar de novo é segu
 
 ## Atribuição (2026-10-14)
 
-**Ordem da atribuição de uma venda** (`vendas.js`): (1) `utm_*` da URL do próprio checkout com campanha (só a PayT manda); (2) último clique do `sck` com campanha, até a hora da venda (num reenvio, a hora gravada da venda); (3) venda-mãe com campanha (upsell/order bump: na PayT a mãe é `transaction_id = upsell_from`, na Digistore24 é a mesma `order_id`); (4) último clique; (5) `utm_*` da URL sem campanha. Upsell sem `sck` herda o `sck` da mãe (e o funil dela, se o store não resolver). As cinco colunas da campanha andam juntas no upsert: venda sem campanha ganha as cinco de uma vez, e venda com campanha A nunca recebe conjunto/anúncio de outra. Upsell/order bump com produto **não cadastrado** (achou a mãe) não vai à Meta nem à TikTok (marca `produto_nao_envia_meta`): o "não cadastrado = envia" vale só para a venda principal.
+**Ordem da atribuição de uma venda** (`vendas.js`): (1) `utm_*` da URL do próprio checkout com campanha (só a PayT manda); (2) último clique do `sck` com campanha, até a hora da venda (num reenvio, a hora gravada da venda); (3) venda-mãe com campanha (upsell/order bump: na PayT a mãe é `transaction_id = upsell_from`, na Digistore24 é a mesma `order_id`); (4) último clique até a venda; (5) `utm_*` da URL sem campanha. "Com campanha" quer dizer id numérico em todo lugar (`^\d{5,}$`): `Teste` e `{campaignid}` gravados antes não contam, e os três ids saem gravados limpos (não numérico vira nulo). O clique da atribuição é sempre o da busca limitada à hora da venda, nunca o mais recente só por ter campanha. Upsell sem `sck` herda o `sck` da mãe (e o funil dela, se o store não resolver). As cinco colunas da campanha andam juntas no upsert: venda sem campanha ganha as cinco de uma vez, e venda com campanha A nunca recebe conjunto/anúncio de outra; campanha gravada não numérica conta como ausente. Upsell/order bump com produto **não cadastrado** (achou a mãe e chegou sem `sck` próprio) não vai à Meta nem à TikTok (marca `produto_nao_envia_meta`): o "não cadastrado = envia" vale só para a venda principal.
 
-**Status só anda para frente:** posto 0 = qualquer não pago, 1 = `paid`, 2 = `refunded`/`chargeback`; no mesmo posto vale o mais novo. `test` nunca sobrescreve status real. **Purchase** (CAPI) só na transição para `paid`, ou com `paid` gravado e `capi_sent` não verdadeiro: `status_refunded` etc. quando o banco ficou com outro status; `ja_enviada` sempre que `capi_sent` já é verdadeiro. **CompletePayment** (TikTok) só na transição (e nunca com `capi_sent` verdadeiro). Venda paga da PayT grava `paid` mesmo quando `transaction.payment_status` vem diferente (ex.: `approved`), menos reembolso/chargeback, que continua vencendo. Logs: `PAID_STATUS_DIVERGENTE` (plataforma disse pago com outro status) e `STATUS_MANTIDO` (o upsert manteve o status antigo).
+**Status só anda para frente:** posto 0 = qualquer não pago, 1 = `paid`, 2 = `refunded`/`chargeback`; no mesmo posto vale o mais novo. `test` nunca sobrescreve status real. **Purchase** (CAPI) só na transição para `paid`, ou com `paid` gravado e `capi_sent` não verdadeiro: `status_refunded` etc. quando o banco ficou com outro status; `ja_enviada` sempre que `capi_sent` já é verdadeiro. **CompletePayment** (TikTok) só na transição (e nunca com `capi_sent` verdadeiro). Venda paga da PayT grava `paid` quando o `transaction.payment_status` é `paid`, `approved`, vazio ou não vem; qualquer outro (`canceled`, `refused`, `expired`, `refunded`, `chargeback`…) é gravado como veio, e o gate não manda nada. Logs: `PAID_STATUS_DIVERGENTE` (plataforma disse pago com outro status) e `STATUS_MANTIDO` (o upsert manteve o status antigo).
 
 **Colunas novas em `sales`**, criadas no boot do `server.js` (`ADD COLUMN IF NOT EXISTS`, como `refunded_at`): `pago_em` (hora do servidor na primeira vez que a venda fica `paid`; vendas pagas antes do deploy ficam nulas) e `utm_url` (JSON dos `utm_*` que o checkout recebeu). O INSERT da venda grava as duas: rode o `ALTER` e o `scripts/verifica-sql.js` **antes** do deploy (item 1 do checklist pré-deploy, no topo). **`SCHEMA_PAGO_EM` no log quer dizer que nenhuma venda está gravando** — rode o `ALTER` à mão na hora:
 

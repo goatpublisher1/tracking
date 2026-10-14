@@ -19,6 +19,9 @@ function fakePool({ storeRow = null } = {}) {
   };
 }
 
+// A busca do clique da atribuicao (com campanha numerica, ate a hora da venda).
+const ehCliqueComCampanha = (t) => t.includes('FROM clicks') && t.includes('created_at <= COALESCE');
+
 function insertSalesArgs(calls) {
   const c = calls.find(c => c.text.includes('INSERT INTO sales'));
   return c.params;
@@ -452,7 +455,7 @@ test('clique com campanha vence clique mais novo sem campanha do mesmo sck', asy
   const comCampanha = { sck: 'idx_c', utm_source: 'FB', utm_campaign: 'C', campaign_id: '444444', adset_id: '555555', ad_id: '666666' };
   const pool = { calls, async query(text, params) {
     calls.push({ text, params });
-    if (text.includes('FROM clicks') && text.includes('campaign_id IS NOT NULL')) return { rows: [comCampanha] };
+    if (ehCliqueComCampanha(text)) return { rows: [comCampanha] };
     if (text.includes('FROM clicks WHERE sck=$1')) return { rows: [recente] };
     return { rows: [] };
   } };
@@ -539,7 +542,7 @@ test('leituras novas que falham (mae, clique com campanha, estado anterior) nunc
   t.after(() => { global.fetch = fetchOriginal; console.warn = avisoOriginal; });
   const base = fakePoolComFunil({ storeRow: { src: 'fb' }, clickRow: { sck: 'idx_abc', campaign_id: null, user_agent: 'UA', created_at: new Date() } });
   const pool = { calls: base.calls, async query(text, params) {
-    if (text.includes('upsell_from = $2') || (text.includes('FROM clicks') && text.includes('campaign_id IS NOT NULL')) || text.includes('SELECT status, capi_sent')) {
+    if (text.includes('upsell_from = $2') || ehCliqueComCampanha(text) || text.includes('SELECT status, capi_sent')) {
       base.calls.push({ text, params });
       throw new Error('banco fora');
     }
@@ -595,8 +598,8 @@ test('as cinco colunas da campanha: venda com campanha A nunca recebe conjunto/a
   await processarVenda(pool, { txId: 'T40', status: 'pending', paid: false, value: 0 });
   const sql = pool.calls.find(c => c.text.includes('INSERT INTO sales')).text;
   for (const col of ['utm_source', 'utm_campaign', 'campaign_id', 'adset_id', 'ad_id']) {
-    const re = new RegExp(`${col} = CASE\\s+WHEN sales\\.campaign_id IS NOT NULL AND sales\\.campaign_id IS DISTINCT FROM EXCLUDED\\.campaign_id THEN sales\\.${col}\\s+`
-      + `WHEN sales\\.campaign_id IS NULL AND EXCLUDED\\.campaign_id IS NOT NULL THEN EXCLUDED\\.${col}\\s+`
+    const re = new RegExp(`${col} = CASE\\s+WHEN sales\\.campaign_id ~ '\\^\\\\d\\{5,\\}\\$' AND sales\\.campaign_id IS DISTINCT FROM EXCLUDED\\.campaign_id THEN sales\\.${col}\\s+`
+      + `WHEN \\(sales\\.campaign_id ~ '\\^\\\\d\\{5,\\}\\$'\\) IS NOT TRUE AND EXCLUDED\\.campaign_id IS NOT NULL THEN EXCLUDED\\.${col}\\s+`
       + `ELSE COALESCE\\(sales\\.${col}, EXCLUDED\\.${col}\\) END,`);
     assert.ok(re.test(sql), col);
   }
@@ -636,11 +639,85 @@ test('clique com campanha limitado a hora da venda: reenvio usa o created_at gra
   const criada = new Date('2026-10-10T12:00:00Z');
   const velha = fakePoolComFunil({ storeRow: { src: 'fb' }, clickRow: clique, antes: { status: 'pending', capi_sent: null, created_at: criada } });
   await processarVenda(velha, { txId: 'T44', sck: 'idx_abc', paid: false, status: 'pending', value: 0, origem: 'payt' });
-  const q = velha.calls.find(c => c.text.includes('FROM clicks') && c.text.includes('campaign_id IS NOT NULL'));
+  const q = velha.calls.find(c => ehCliqueComCampanha(c.text));
   assert.ok(/created_at <= COALESCE\(\$2::timestamptz, now\(\)\)/.test(q.text));
   assert.deepStrictEqual(q.params, ['idx_abc', criada]);
   assert.ok(velha.calls.find(c => c.text.includes('SELECT status, capi_sent, created_at FROM sales')));
   const nova = fakePoolComFunil({ storeRow: { src: 'fb' }, clickRow: clique });
   await processarVenda(nova, { txId: 'T45', sck: 'idx_abc', paid: false, status: 'pending', value: 0, origem: 'payt' });
-  assert.deepStrictEqual(nova.calls.find(c => c.text.includes('FROM clicks') && c.text.includes('campaign_id IS NOT NULL')).params, ['idx_abc', null]);
+  assert.deepStrictEqual(nova.calls.find(c => ehCliqueComCampanha(c.text)).params, ['idx_abc', null]);
+});
+
+// ---- revisao final da branch
+
+test('Digistore24: venda principal com sck proprio e irma com campanha continua indo a Meta (produto nao cadastrado)', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url) => { urls.push(url); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const irma = { sck: 'idx_outro', utm_source: 'FB', utm_campaign: 'Camp', campaign_id: '111111', adset_id: '222222', ad_id: '333333', funnel_id: 1 };
+  const base = fakePoolComFunil({ storeRow: { src: null } });
+  const pool = { calls: base.calls, async query(text, params) {
+    if (text.includes('upsell_from = $2')) { base.calls.push({ text, params }); return { rows: [irma] }; }
+    return base.query(text, params);
+  } };
+  const r = await processarVenda(pool, { txId: 'ds24_M1', sck: 'idx_abc', upsellFrom: 'ORD1', paid: true, status: 'paid',
+    value: 10, total: 10, origem: 'digistore24', productCode: 'ds24_NAOCADASTRADO' });
+  assert.ok(urls.some(u => u.includes('graph.facebook.com')), 'Purchase da principal sai');
+  assert.strictEqual(r.motivo, null);
+  assert.strictEqual(insertSalesArgs(pool.calls)[2], 'idx_abc', 'o sck proprio vence o da irma');
+});
+
+test('clique com campanha criado DEPOIS da venda nao entra na atribuicao (reenvio do webhook)', async () => {
+  const criada = new Date('2026-10-10T12:00:00Z');
+  const depois = { sck: 'idx_abc', utm_source: 'FB', utm_campaign: 'Outra', campaign_id: '777777', adset_id: '888888', ad_id: '999999',
+    user_agent: 'UA', created_at: new Date('2026-10-12T12:00:00Z') };
+  const base = fakePoolComFunil({ storeRow: { src: 'fb' }, antes: { status: 'pending', capi_sent: null, created_at: criada } });
+  const pool = { calls: base.calls, async query(text, params) {
+    // o banco aplica o limite de tempo: nenhum clique com campanha ate a venda
+    if (ehCliqueComCampanha(text)) { base.calls.push({ text, params }); return { rows: [] }; }
+    if (text.includes('FROM clicks WHERE sck=$1')) { base.calls.push({ text, params }); return { rows: [depois] }; }
+    return base.query(text, params);
+  } };
+  await processarVenda(pool, { txId: 'T50', sck: 'idx_abc', paid: false, status: 'pending', value: 0, origem: 'digistore24' });
+  assert.deepStrictEqual(insertSalesArgs(pool.calls).slice(12, 17), [undefined, undefined, null, null, null]);
+  assert.deepStrictEqual(pool.calls.find(c => ehCliqueComCampanha(c.text)).params, ['idx_abc', criada]);
+});
+
+test("campanha nao numerica ('Teste') nao conta: a mae com campanha vence, e o id lixo nunca e gravado", async () => {
+  const teste = { sck: 'idx_abc', utm_source: 'FB', utm_campaign: 'Camp', campaign_id: 'Teste', adset_id: 'S1', ad_id: 'A1', user_agent: 'UA', created_at: new Date() };
+  const mae = { sck: 'idx_abc', utm_source: 'FB', utm_campaign: 'Mae', campaign_id: '121212', adset_id: '343434', ad_id: '565656', funnel_id: 1 };
+  const comMae = (maeRow) => {
+    const base = fakePoolComFunil({ storeRow: { src: 'fb' }, clickRow: teste });
+    return { calls: base.calls, async query(text, params) {
+      if (text.includes('upsell_from = $2')) { base.calls.push({ text, params }); return { rows: maeRow ? [maeRow] : [] }; }
+      return base.query(text, params);   // o pool falso devolve o clique 'Teste' ate na busca com campanha
+    } };
+  };
+  const p1 = comMae(mae);
+  await processarVenda(p1, { txId: 'T51', sck: 'idx_abc', upsellFrom: 'PAI', paid: false, status: 'pending', value: 0, origem: 'payt' });
+  assert.deepStrictEqual(insertSalesArgs(p1.calls).slice(12, 17), ['FB', 'Mae', '121212', '343434', '565656']);
+  // sem mae: o clique 'Teste' fica so como reserva (fonte), sem os ids lixo
+  const p2 = comMae(null);
+  await processarVenda(p2, { txId: 'T52', sck: 'idx_abc', upsellFrom: 'PAI', paid: false, status: 'pending', value: 0, origem: 'payt' });
+  assert.deepStrictEqual(insertSalesArgs(p2.calls).slice(12, 17), ['FB', 'Camp', null, null, null]);
+  // as buscas do banco tambem so aceitam id numerico
+  assert.ok(p1.calls.find(c => ehCliqueComCampanha(c.text)).text.includes("campaign_id ~ '^\\d{5,}$'"));
+  assert.ok(p1.calls.find(c => c.text.includes('upsell_from = $2')).text.includes("ORDER BY (campaign_id ~ '^\\d{5,}$') IS TRUE DESC"));
+});
+
+test('backfill horario: um try por UPDATE, cada falha com o proprio log, e os outros rodam', async (t) => {
+  const { herdarDoProduto, SQL_HERDA_FUNIL_CLIQUE } = require('../vendas');
+  const erros = []; const logs = [];
+  const errOriginal = console.error; const logOriginal = console.log;
+  console.error = (...a) => erros.push(String(a[0])); console.log = (...a) => logs.push(a.join(' '));
+  t.after(() => { console.error = errOriginal; console.log = logOriginal; });
+  const feitos = [];
+  await herdarDoProduto({ async query(text) {
+    if (text === SQL_HERDA_FUNIL_VENDA) throw new Error('timeout');
+    feitos.push(text === SQL_HERDA_FUNIL_CLIQUE ? 'clique' : 'offer_type');
+    return { rowCount: 2 };
+  } });
+  assert.deepStrictEqual(erros, ['FUNNEL_ID_HERDADO_ERRO']);
+  assert.deepStrictEqual(feitos, ['offer_type', 'clique'], 'a falha do funil da venda nao pula o do clique');
+  assert.ok(logs.includes('OFFER_TYPE_HERDADO 2') && logs.includes('FUNNEL_CLIQUE_HERDADO 2'));
 });
