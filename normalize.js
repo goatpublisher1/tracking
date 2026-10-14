@@ -15,7 +15,8 @@ function deepDecode(value) {
     // "%" solto em nome de anuncio ("Oferta 50% OFF") fazia decodeURIComponent lancar: o /collect
     // devolvia 500 e as UTMs da venda se perdiam. Nunca lanca: no erro, fica o ultimo valor bom.
     let dec;
-    try { dec = decodeURIComponent(out.replace(/\+/g, ' ')); } catch (e) { break; }
+    // O + como espaco vale mesmo quando o decode aborta ("Oferta+50%+OFF" -> "Oferta 50% OFF").
+    try { dec = decodeURIComponent(out.replace(/\+/g, ' ')); } catch (e) { out = out.replace(/\+/g, ' '); break; }
     if (dec === out) break;
     out = dec;
   }
@@ -135,4 +136,4 @@ function ttpDe(b) {
   return v ? v.slice(0, 200) : null;
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo };
+module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo, idNumerico, FONTES_SITE_META };

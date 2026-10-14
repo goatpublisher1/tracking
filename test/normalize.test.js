@@ -109,3 +109,8 @@ test('site do Meta com campanha numerica vira FB; sem campanha (organico) fica c
   assert.strictEqual(normalizeUtms({ utm_source: 'facebook', utm_campaign: 'Camp|120257032762500768' }).utm_source, 'FB');
   assert.strictEqual(normalizeUtms({ utm_source: 'ig', utm_medium: 'social', utm_content: 'link_in_bio' }).utm_source, 'ig');
 });
+
+test('deepDecode: no decode abortado pelo % solto o + ainda vira espaco', () => {
+  const { deepDecode } = require('../normalize');
+  assert.strictEqual(deepDecode('Oferta+50%+OFF|120257'), 'Oferta 50% OFF|120257');
+});

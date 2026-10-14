@@ -631,14 +631,30 @@ O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e
 
 ## Reatribuir o histórico (2026-10-14)
 
-Corrige cliques e vendas gravados antes do fix de atribuição (parâmetros automáticos do Meta, `::fbclid::` colado no id, venda sem clique pelo `sck`). Só mexe em `utm_source`, `utm_campaign` (vendas) e nos ids; nunca em status, valor ou CAPI.
+Corrige cliques e vendas gravados antes das regras novas: parâmetros automáticos do Meta, `::fbclid::` colado no id, id que não é número, `utm_source` de site do Meta (`fb`, `ig`, `an`, `msg`, `th`, `facebook`, `instagram`) com campanha virando `FB`. Venda sem campanha segue a ordem do webhook: URL do checkout com campanha (`utm_url`; o `src` quando a coluna ainda não existe ou o JSON veio cortado) → último clique do `sck` com campanha criado até a venda → venda-mãe com campanha → nada. Venda que já tem campanha só ganha ids limpos e a fonte normalizada (a campanha nunca é trocada). Linha com `campaign_id` gravado que não é número (`{campaignid}`) fica como está. Só mexe em `utm_source`, `utm_campaign` (vendas) e nos ids; nunca em status, valor ou CAPI.
 
+Rodar **depois do deploy do tracking** (antes, o código antigo continua gravando do jeito velho), nesta ordem:
+
+1. Simulação, não grava nada: `node scripts/reatribuir.js`. Mostra por funil quantos cliques mudam, quantas vendas ganham campanha (quantas pagas e a receita **só das pagas**), quantas têm ids limpos, quantas têm a fonte normalizada, e 10 exemplos.
+2. **Backup, antes do `--aplicar`:**
+   ```bash
+   node scripts/q.js "CREATE TABLE IF NOT EXISTS sales_reatrib_bkp AS SELECT transaction_id, utm_source, utm_campaign, campaign_id, adset_id, ad_id, now() AS copiado_em FROM sales WHERE created_at > now() - interval '91 days'"
+   node scripts/q.js "CREATE TABLE IF NOT EXISTS clicks_reatrib_bkp AS SELECT sck, created_at, utm_source, campaign_id, adset_id, ad_id, now() AS copiado_em FROM clicks WHERE created_at > now() - interval '91 days'"
+   node scripts/q.js "SELECT (SELECT count(*) FROM sales_reatrib_bkp) AS vendas, (SELECT count(*) FROM clicks_reatrib_bkp) AS cliques, (SELECT min(copiado_em) FROM sales_reatrib_bkp) AS copiado_em"
+   ```
+   Com `IF NOT EXISTS`, se a tabela já existe fica a cópia antiga (confira `copiado_em`): é ela que desfaz a primeira aplicação.
+3. `node scripts/reatribuir.js --aplicar`: grava numa transação (erro no meio: `ROLLBACK`, nada fica). Cada `UPDATE` só vale se a linha ainda tem o `campaign_id` lido (no clique, também o `ctid` e o `sck`); o que o webhook ou o backfill horário mexeu no meio fica como está e aparece como "linha(s) mudaram depois da leitura". Nesse caso, rode o `--aplicar` de novo.
+4. Simulação de novo: tem de dar `0 clique(s) e 0 venda(s)`.
+
+**Desfazer** (volta as colunas da cópia; também desfaz o que o webhook gravou nessas linhas depois do backup, então desfaça logo):
 ```bash
-node scripts/reatribuir.js            # simulação: mostra por funil o que mudaria e 10 exemplos
-node scripts/reatribuir.js --aplicar  # grava numa transação
+node scripts/q.js "UPDATE sales s SET utm_source = b.utm_source, utm_campaign = b.utm_campaign, campaign_id = b.campaign_id, adset_id = b.adset_id, ad_id = b.ad_id FROM sales_reatrib_bkp b WHERE b.transaction_id = s.transaction_id AND (s.utm_source, s.utm_campaign, s.campaign_id, s.adset_id, s.ad_id) IS DISTINCT FROM (b.utm_source, b.utm_campaign, b.campaign_id, b.adset_id, b.ad_id)"
+node scripts/q.js "UPDATE clicks c SET utm_source = b.utm_source, campaign_id = b.campaign_id, adset_id = b.adset_id, ad_id = b.ad_id FROM clicks_reatrib_bkp b WHERE b.sck = c.sck AND b.created_at = c.created_at AND (c.utm_source, c.campaign_id, c.adset_id, c.ad_id) IS DISTINCT FROM (b.utm_source, b.campaign_id, b.adset_id, b.ad_id)"
 ```
 
-Padrão: 30 dias (`--dias N`, até 90). Rodar de novo é seguro: o que já está certo não entra.
+Quando a cópia não for mais necessária: `node scripts/q.js "DROP TABLE sales_reatrib_bkp, clicks_reatrib_bkp"`.
+
+Padrão: 30 dias (`--dias N`, até 90; o backup cobre 91). Rodar de novo é seguro: o que já está certo não entra.
 
 ## Atribuição (2026-10-14)
 
