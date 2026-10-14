@@ -115,4 +115,4 @@ function ttpDe(b) {
   return v ? v.slice(0, 200) : null;
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe };
+module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo };

@@ -612,6 +612,17 @@ O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e
 6. **Volume:** `event_log` ganha uma linha por pixel por clique de checkout. A retenção de 90 dias sugerida na Task 8 passa a valer a pena.
 7. **Rollback:** `CAPI_IC_DESLIGADO=1` desliga o IC sem deploy (o do pixel continua), mas a mudança da variável no Coolify só vale depois de **reiniciar** o serviço; falhas aparecem como `CAPI_IC_FALHOU` nos logs. O Purchase novo não tem switch — os campos a mais são só dados que a Meta aceita ou ignora.
 
+## Reatribuir o histórico (2026-10-14)
+
+Corrige cliques e vendas gravados antes do fix de atribuição (parâmetros automáticos do Meta, `::fbclid::` colado no id, venda sem clique pelo `sck`). Só mexe em `utm_source`, `utm_campaign` (vendas) e nos ids; nunca em status, valor ou CAPI.
+
+```bash
+node scripts/reatribuir.js            # simulação: mostra por funil o que mudaria e 10 exemplos
+node scripts/reatribuir.js --aplicar  # grava numa transação
+```
+
+Padrão: 30 dias (`--dias N`, até 90). Rodar de novo é seguro: o que já está certo não entra.
+
 ## Funil sem pixel do Meta
 
 Um registro de `funnels` "tem pixel" quando `pixel_id` e `capi_token` estão preenchidos (`temPixel` em `capi.js`). Registro ativo sem pixel grava clique (`/collect`) e venda normalmente, resolve funil por domínio/slug/sck/produto como sempre, e **não** fala com a CAPI: `vendas.js` marca `{"skipped":"sem_pixel"}` e loga `CAPI_SEM_PIXEL`; `ic.js` não manda IC nem grava `event_log`; `reprocessa-capi.js` pula com `sem pixel no dominio`. Quando o pixel é cadastrado depois (dashboard, aba Meta Ads do cartão), a CAPI vale dali em diante — nada do passado é reenviado.
