@@ -623,6 +623,22 @@ node scripts/reatribuir.js --aplicar  # grava numa transação
 
 Padrão: 30 dias (`--dias N`, até 90). Rodar de novo é seguro: o que já está certo não entra.
 
+## Atribuição (2026-10-14)
+
+**Ordem da atribuição de uma venda** (`vendas.js`): (1) `utm_*` da URL do próprio checkout com campanha (só a PayT manda); (2) último clique do `sck` com campanha, até a hora da venda; (3) venda-mãe com campanha (upsell/order bump: na PayT a mãe é `transaction_id = upsell_from`, na Digistore24 é a mesma `order_id`); (4) último clique; (5) `utm_*` da URL sem campanha. Upsell sem `sck` herda o `sck` da mãe (e o funil dela, se o store não resolver). As cinco colunas da campanha andam juntas no upsert.
+
+**Status só anda para frente:** posto 0 = qualquer não pago, 1 = `paid`, 2 = `refunded`/`chargeback`; no mesmo posto vale o mais novo. `test` nunca sobrescreve status real. **Purchase** (CAPI) só na transição para `paid`, ou com `paid` gravado e `capi_sent` não verdadeiro (resultado `ja_enviada` quando já foi; `status_refunded` etc. quando o banco ficou com outro status); **CompletePayment** (TikTok) só na transição.
+
+**Colunas novas em `sales`**, criadas no boot do `server.js` (`ADD COLUMN IF NOT EXISTS`, como `refunded_at`): `pago_em` (hora do servidor na primeira vez que a venda fica `paid`; vendas pagas antes do deploy ficam nulas) e `utm_url` (JSON dos `utm_*` que o checkout recebeu). O INSERT da venda grava as duas: **`SCHEMA_PAGO_EM` no log quer dizer que nenhuma venda está gravando** — rode o `ALTER` à mão na hora:
+
+```bash
+node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
+```
+
+Produto cadastrado em funil desativado continua valendo (tipo da oferta, `send_to_meta`, `send_to_tiktok`; o ativo vem primeiro). O backfill horário também dá funil a clique sem funil dos últimos 7 dias, pelo domínio da `landing_url` (`FUNNEL_CLIQUE_HERDADO`).
+
+**Deploy: tracking antes do dashboard** (o dashboard passa a ler `pago_em`).
+
 ## Funil sem pixel do Meta
 
 Um registro de `funnels` "tem pixel" quando `pixel_id` e `capi_token` estão preenchidos (`temPixel` em `capi.js`). Registro ativo sem pixel grava clique (`/collect`) e venda normalmente, resolve funil por domínio/slug/sck/produto como sempre, e **não** fala com a CAPI: `vendas.js` marca `{"skipped":"sem_pixel"}` e loga `CAPI_SEM_PIXEL`; `ic.js` não manda IC nem grava `event_log`; `reprocessa-capi.js` pula com `sem pixel no dominio`. Quando o pixel é cadastrado depois (dashboard, aba Meta Ads do cartão), a CAPI vale dali em diante — nada do passado é reenviado.

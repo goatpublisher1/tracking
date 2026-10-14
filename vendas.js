@@ -10,7 +10,28 @@ const { normalizeUtms } = require('./normalize');
 async function processarVenda(pool, venda) {
   const { txId, sck, paid, value, total } = venda;
 
-  // ---- resolucao de funil: pixel -> sck/store -> product_code -> funil unico
+  // ---- venda-mae: upsell e order bump chegam sem sck e sem utm (a plataforma cobra sem passar
+  // pelo checkout de novo) e caiam em "Sem origem". A mae e quem passou pelo clique: na PayT o
+  // upsell traz o transaction_id dela em upsell_from; na Digistore24 todas as vendas do pedido
+  // trazem o mesmo order_id em upsell_from. Prefere a irma com campanha, depois a mais antiga.
+  // try: nada aqui pode impedir o INSERT da venda.
+  let mae = null;
+  if (venda.upsellFrom) {
+    try {
+      const m = await pool.query(
+        `SELECT sck, utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id FROM sales
+          WHERE transaction_id <> $1 AND (transaction_id = $2 OR upsell_from = $2)
+          ORDER BY (campaign_id IS NOT NULL) DESC, created_at ASC LIMIT 1`, [txId, venda.upsellFrom]);
+      mae = m.rows[0] || null;
+    } catch (e) {
+      console.warn('VENDA_MAE_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
+    }
+  }
+  // O sck da mae vale para tudo que vem do navegador (store, clique, external_id da CAPI) e e o
+  // que fica gravado: o upsell passa a ser da mesma pessoa e do mesmo clique.
+  const sckEfetivo = sck || mae?.sck || null;
+
+  // ---- resolucao de funil: pixel -> sck/store -> venda-mae -> product_code -> funil unico
   let funnel = null;
   // Postback de afiliado: a conexao S2S e dedicada a uma parceria, entao o
   // funil vem fixo na URL. Sem sck e sem produto cadastrado, nada abaixo
@@ -25,10 +46,19 @@ async function processarVenda(pool, venda) {
       'SELECT * FROM funnels WHERE active AND pixel_id = $1 LIMIT 1', [venda.pixelId]);
     funnel = r.rows[0] || null;
   }
-  if (!funnel && sck) {
-    const s = await pool.query('SELECT funnel_id FROM store WHERE sck=$1', [sck]);
+  if (!funnel && sckEfetivo) {
+    const s = await pool.query('SELECT funnel_id FROM store WHERE sck=$1', [sckEfetivo]);
     if (s.rows[0]?.funnel_id)
       funnel = (await pool.query('SELECT * FROM funnels WHERE id=$1', [s.rows[0].funnel_id])).rows[0];
+  }
+  // Upsell sem store: o funil e o da mae, antes do fallback por produto (o produto do upsell pode
+  // estar cadastrado em outro funil, ou em nenhum).
+  if (!funnel && mae?.funnel_id) {
+    try {
+      funnel = (await pool.query('SELECT * FROM funnels WHERE id=$1', [mae.funnel_id])).rows[0] || null;
+    } catch (e) {
+      console.warn('VENDA_MAE_FALHOU', JSON.stringify({ tx: txId, etapa: 'funil', erro: String(e).slice(0, 120) }));
+    }
   }
 
   // fallback: pelo product_code — resolve vendas sem sck e classifica a oferta
@@ -43,10 +73,14 @@ async function processarVenda(pool, venda) {
   // lado seguro). Cadastrado, segue send_to_tiktok.
   let sendToTikTok = false;
   if (venda.productCode) {
+    // Sem `AND f.active`: quando o dominio troca, o funil antigo e desativado mas o produto continua
+    // cadastrado nele — e eram o offer_type e o send_to_* dele que sumiam (o upsell perdia o tipo e
+    // ia para a Meta). O ativo, se houver, vem primeiro.
     const pr = await pool.query(
       `SELECT pr.offer_type, pr.send_to_meta, pr.send_to_tiktok, f.* FROM products pr
        JOIN funnels f ON f.slug = pr.funnel_slug
-       WHERE pr.product_code = $1 AND pr.active AND f.active LIMIT 1`, [venda.productCode]);
+       WHERE pr.product_code = $1 AND pr.active
+       ORDER BY f.active DESC NULLS LAST LIMIT 1`, [venda.productCode]);
     if (pr.rows[0]) {
       offerType = pr.rows[0].offer_type;
       sendToMeta = pr.rows[0].send_to_meta !== false;
@@ -83,12 +117,26 @@ async function processarVenda(pool, venda) {
   // ---- dados do browser gravados no checkout
   let store = null;
   let click = null;
-  if (sck) {
-    const s = await pool.query('SELECT * FROM store WHERE sck=$1', [sck]);
+  let cliqueComCampanha = null;
+  if (sckEfetivo) {
+    const s = await pool.query('SELECT * FROM store WHERE sck=$1', [sckEfetivo]);
     store = s.rows[0] || null;
     const c = await pool.query(
-      'SELECT * FROM clicks WHERE sck=$1 ORDER BY created_at DESC LIMIT 1', [sck]);
+      'SELECT * FROM clicks WHERE sck=$1 ORDER BY created_at DESC LIMIT 1', [sckEfetivo]);
     click = c.rows[0] || null;
+    // O clique mais recente pode ser uma volta sem anuncio (aba reaberta, link da bio) depois do
+    // clique pago, e apagava a campanha da venda. Para a atribuicao vale o ultimo clique COM
+    // campanha ate a venda; o mais recente continua sendo o do navegador na CAPI.
+    if (click && !click.campaign_id) {
+      try {
+        const cc = await pool.query(
+          `SELECT * FROM clicks WHERE sck=$1 AND campaign_id IS NOT NULL AND created_at <= now()
+            ORDER BY created_at DESC LIMIT 1`, [sckEfetivo]);
+        cliqueComCampanha = cc.rows[0] || null;
+      } catch (e) {
+        console.warn('CLIQUE_COM_CAMPANHA_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
+      }
+    }
   }
 
   // O IPN da Digistore24 nao tem campo de src (sid1 e do postback de afiliado),
@@ -99,10 +147,10 @@ async function processarVenda(pool, venda) {
   // Mesmo fallback vale para event_log.src abaixo — os dois tem que concordar.
   const srcFinal = venda.src || store?.src || null;
 
-  // Atribuicao: o clique do checkout (pelo sck) com campanha e a verdade. Sem ele — venda sem
-  // sck do nosso, comprador em outro aparelho, upsell de um clique — vale o que a plataforma
-  // recebeu na URL do checkout (so a PayT manda; a Digistore24 nao tem utm no IPN). Antes a
-  // venda caia em "Sem origem" mesmo com a campanha inteira na URL.
+  // Atribuicao, nesta ordem: (1) utm_* da URL do proprio checkout com campanha — e o anuncio que
+  // trouxe ESTA compra, enquanto o clique do mesmo sck pode ser de dias antes, de outra campanha
+  // (so a PayT manda; a Digistore24 nao tem utm no IPN); (2) ultimo clique do sck com campanha;
+  // (3) venda-mae com campanha (upsell); (4) ultimo clique; (5) utm_* da URL sem campanha.
   // try: decodeURIComponent lanca com "%" solto, e nada aqui pode impedir o INSERT da venda.
   let daUrl = null;
   try {
@@ -110,25 +158,39 @@ async function processarVenda(pool, venda) {
   } catch (e) {
     console.warn('UTM_DA_URL_INVALIDA', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
   }
-  const atrib = (click && click.campaign_id ? click : null)
-    || (daUrl && daUrl.campaign_id ? daUrl : null)
-    || click || daUrl || null;
+  const comCampanha = (x) => (x && x.campaign_id ? x : null);
+  const atrib = comCampanha(daUrl) || comCampanha(cliqueComCampanha) || comCampanha(click)
+    || comCampanha(mae) || click || daUrl || null;
 
-  await pool.query(
+  // Como a venda estava ANTES deste webhook. PayT e Digistore24 reapresentam o mesmo webhook, e
+  // cada reenvio virava outro Purchase (a dedupe da Meta por event_id so cobre 48h).
+  // try: se a leitura falhar, a venda segue como hoje (envia).
+  let antes = null;
+  try {
+    antes = (await pool.query('SELECT status, capi_sent FROM sales WHERE transaction_id=$1', [txId])).rows[0] || null;
+  } catch (e) {
+    console.warn('VENDA_ANTES_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
+  }
+
+  const retorno = await pool.query(
     `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
        currency, product_code, product_name, customer_email, customer_phone,
        utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
        payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma,
-       refunded_at)
+       refunded_at, pago_em, utm_url)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
-       CASE WHEN $5 IN ('refunded','chargeback') THEN now() END)
+       CASE WHEN $5 IN ('refunded','chargeback') THEN now() END,
+       CASE WHEN $5 = 'paid' THEN now() END, $28)
      ON CONFLICT (transaction_id) DO UPDATE SET
-       -- transicoes: estado terminal (refunded/chargeback) nao volta para paid/pending por
-       -- um webhook atrasado ou reapresentado, e paid nao regride para pending. Um 'test'
-       -- nunca sobrescreve estado real, e vice-versa nao acontece (mesma transacao).
+       -- status so anda para frente, por posto: 0 = qualquer nao pago, 1 = paid,
+       -- 2 = refunded/chargeback. Webhook atrasado ou reapresentado nao desfaz pagamento nem
+       -- reembolso (paid -> canceled/expired tambem passava); no mesmo posto vale o mais novo.
+       -- 'test' nunca sobrescreve status real.
        status = CASE
-         WHEN sales.status IN ('refunded','chargeback') AND EXCLUDED.status IN ('paid','pending','waiting_payment') THEN sales.status
-         WHEN sales.status = 'paid' AND EXCLUDED.status IN ('pending','waiting_payment') THEN sales.status
+         WHEN EXCLUDED.status = 'test' THEN COALESCE(sales.status, EXCLUDED.status)
+         WHEN (CASE WHEN EXCLUDED.status = 'paid' THEN 1 WHEN EXCLUDED.status IN ('refunded','chargeback') THEN 2 ELSE 0 END)
+            < (CASE WHEN sales.status = 'paid' THEN 1 WHEN sales.status IN ('refunded','chargeback') THEN 2 ELSE 0 END)
+           THEN sales.status
          ELSE EXCLUDED.status END,
        event_id = EXCLUDED.event_id,
        -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
@@ -138,11 +200,16 @@ async function processarVenda(pool, venda) {
        sck = COALESCE(sales.sck, EXCLUDED.sck),
        src = COALESCE(sales.src, EXCLUDED.src),
        funnel_id = COALESCE(sales.funnel_id, EXCLUDED.funnel_id),
-       utm_source = COALESCE(sales.utm_source, EXCLUDED.utm_source),
-       utm_campaign = COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign),
-       campaign_id = COALESCE(sales.campaign_id, EXCLUDED.campaign_id),
-       adset_id = COALESCE(sales.adset_id, EXCLUDED.adset_id),
-       ad_id = COALESCE(sales.ad_id, EXCLUDED.ad_id),
+       -- as cinco colunas da campanha andam juntas: venda gravada sem campanha (webhook pendente
+       -- antes do clique casar, upsell antes da mae) ganha as cinco do webhook seguinte que tiver
+       -- campanha. Com COALESCE coluna a coluna, a utm_source do clique sem campanha ficava ao
+       -- lado do campaign_id do outro.
+       utm_source = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_source ELSE COALESCE(sales.utm_source, EXCLUDED.utm_source) END,
+       utm_campaign = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_campaign ELSE COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign) END,
+       campaign_id = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.campaign_id ELSE COALESCE(sales.campaign_id, EXCLUDED.campaign_id) END,
+       adset_id = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.adset_id ELSE COALESCE(sales.adset_id, EXCLUDED.adset_id) END,
+       ad_id = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.ad_id ELSE COALESCE(sales.ad_id, EXCLUDED.ad_id) END,
+       utm_url = COALESCE(sales.utm_url, EXCLUDED.utm_url),
        city = COALESCE(sales.city, EXCLUDED.city),
        state = COALESCE(sales.state, EXCLUDED.state),
        country = COALESCE(sales.country, EXCLUDED.country),
@@ -156,8 +223,17 @@ async function processarVenda(pool, venda) {
        -- a hora em que a venda virou reembolso/chargeback: so na primeira vez, e nunca apagada
        refunded_at = CASE
          WHEN sales.refunded_at IS NULL AND EXCLUDED.status IN ('refunded','chargeback') THEN now()
-         ELSE sales.refunded_at END`,
-    [txId, 'purchase_' + txId, sck, srcFinal, venda.status,
+         ELSE sales.refunded_at END,
+       -- pago_em: hora do servidor em que a venda virou paid (o paid_at da PayT vem 3h adiantado e
+       -- a Digistore24 nao manda). So na transicao: venda que ja estava paid antes desta coluna
+       -- existir fica nula (o dashboard cai no created_at), em vez de ganhar a hora de um reenvio
+       -- dias depois; e paid atrasado sobre reembolso nao conta.
+       pago_em = CASE
+         WHEN sales.pago_em IS NULL AND EXCLUDED.status = 'paid'
+           AND COALESCE(sales.status, '') NOT IN ('paid','refunded','chargeback') THEN now()
+         ELSE sales.pago_em END
+     RETURNING status`,
+    [txId, 'purchase_' + txId, sckEfetivo, srcFinal, venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,
      atrib?.utm_source, atrib?.utm_campaign, atrib?.campaign_id,
@@ -165,8 +241,13 @@ async function processarVenda(pool, venda) {
      venda.paymentMethod, venda.paidAt, venda.upsellFrom,
      (store?.city || venda.city || null), (store?.state || venda.state || null),
      (store?.country || venda.country || null),
-     (venda.ip || store?.ip_override || null), venda.origem]
+     (venda.ip || store?.ip_override || null), venda.origem,
+     // utm_url: os utm_* crus que o checkout recebeu, para conferir/reatribuir depois
+     venda.utms ? JSON.stringify(venda.utms).slice(0, 2000) : null]
   );
+  // O status que ficou gravado decide os envios abaixo: um 'paid' atrasado depois do reembolso
+  // grava 'refunded' e nao pode virar Purchase. `?? venda.status`: pool sem RETURNING (testes).
+  const statusFinal = retorno?.rows?.[0]?.status ?? venda.status;
 
   // ---- CAPI para CADA pixel ativo do dominio (multi-conta)
   // Upsell/backend ficam no banco mas nao vao para a Meta, para nao inflar
@@ -191,15 +272,22 @@ async function processarVenda(pool, venda) {
     customer_name: venda.nome,
     // Para o user_data da CAPI: sck vira external_id; geo e ip sao fallback
     // quando o store nao tem (o header nunca mandou geo; PayT manda ip,
-    // Digistore24 manda geo).
-    sck,
+    // Digistore24 manda geo). O sck efetivo e o gravado: o reprocesso manda o mesmo.
+    sck: sckEfetivo,
     city: venda.city, state: venda.state, country: venda.country,
     ip: venda.ip,
     currency: funnel?.currency || 'BRL',
   };
 
   let motivoMeta = null;
-  if (paid && funnels.length && sendToMeta) {
+  // Purchase so na transicao para paid, ou com paid gravado e capi_sent nao verdadeiro (a
+  // primeira tentativa falhou e o reenvio do webhook e a segunda chance). capi_response fica
+  // como estava nos dois pulos abaixo: e o registro do envio que valeu.
+  if (paid && antes?.status === 'paid' && antes?.capi_sent === true) {
+    motivoMeta = 'ja_enviada';
+  } else if (paid && statusFinal !== 'paid') {
+    motivoMeta = 'status_' + statusFinal;
+  } else if (paid && funnels.length && sendToMeta) {
     const resultados = [];
     for (const f of funnels) {
       try {
@@ -255,7 +343,9 @@ async function processarVenda(pool, venda) {
 
   // ---- TikTok: depois da Meta, nunca no caminho dela. Um CompletePayment por
   // pixel TikTok ativo do dominio; falha vira log e linha no event_log (status 0).
-  if (paid && funnel && sendToTikTok && process.env.TIKTOK_EVENTS_DESLIGADO !== '1') {
+  // Sem capi_sent do lado da TikTok: so na transicao para paid, nunca no reenvio do webhook.
+  if (paid && statusFinal === 'paid' && antes?.status !== 'paid' && funnel && sendToTikTok
+      && process.env.TIKTOK_EVENTS_DESLIGADO !== '1') {
     await enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, txId });
   }
 

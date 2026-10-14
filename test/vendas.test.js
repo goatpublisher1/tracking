@@ -50,13 +50,16 @@ test('sem venda.src e sem store (ou sem sck), src grava null', async () => {
 
 // Pool falso que resolve um funil (via store.funnel_id) e paga a venda, para exercitar
 // o INSERT INTO event_log — que so acontece depois de um Purchase enviado com sucesso.
-function fakePoolComFunil({ storeRow, clickRow, tiktokRows = [], produtoRow = null }) {
+// `antes`: a linha de sales antes do webhook; `retorno`: o que o upsert devolve (RETURNING status).
+function fakePoolComFunil({ storeRow, clickRow, tiktokRows = [], produtoRow = null, antes = null, retorno = null }) {
   const calls = [];
   const funnelRow = { id: 1, slug: 'x-fb1', domain: 'x.com', pixel_id: '123', capi_token: 'tok', currency: 'BRL', active: true };
   return {
     calls,
     async query(text, params) {
       calls.push({ text, params });
+      if (text.includes('SELECT status, capi_sent FROM sales')) return { rows: antes ? [antes] : [] };
+      if (text.includes('INSERT INTO sales')) return { rows: retorno ? [retorno] : [] };
       if (text.includes('SELECT funnel_id FROM store WHERE sck=$1')) return { rows: [{ funnel_id: 1 }] };
       if (text.includes('SELECT * FROM funnels WHERE id=$1')) return { rows: [funnelRow] };
       if (text.includes('SELECT * FROM funnels WHERE active AND domain')) return { rows: [funnelRow] };
@@ -76,7 +79,7 @@ test('event_log.src usa o mesmo fallback que sales.src (Digistore24 sem venda.sr
   t.after(() => { global.fetch = fetchOriginal; });
 
   const pool = fakePoolComFunil({ storeRow: { src: 'fb_utm_123' } });
-  const venda = { txId: 'ds24_T4', sck: 'idx_abc', src: null, paid: true, value: 10, total: 10, origem: 'digistore24' };
+  const venda = { txId: 'ds24_T4', sck: 'idx_abc', src: null, paid: true, status: 'paid', value: 10, total: 10, origem: 'digistore24' };
   await processarVenda(pool, venda);
 
   const eventLog = pool.calls.find(c => c.text.includes('INSERT INTO event_log'));
@@ -94,7 +97,7 @@ test('o Purchase leva sck, geo e ip da venda e o clique com fbclid', async (t) =
     storeRow: { src: 'fb', fbp: 'fb.1.1.2' },
     clickRow: { sck: 'idx_abc', fbclid: 'CLK', created_at: new Date(1700000000000), ip: '5.5.5.5', user_agent: 'UA' },
   });
-  const venda = { txId: 'T5', sck: 'idx_abc', src: 'fb', paid: true, value: 10, total: 10, origem: 'digistore24',
+  const venda = { txId: 'T5', sck: 'idx_abc', src: 'fb', paid: true, status: 'paid', value: 10, total: 10, origem: 'digistore24',
     email: 'a@b.com', city: 'Austin', state: 'TX', country: 'United States', ip: null };
   await processarVenda(pool, venda);
 
@@ -115,7 +118,7 @@ test('Purchase que falha (fetch lanca) grava event_log com http_status 0 e a fun
   t.after(() => { console.error = errOriginal; });
 
   const pool = fakePoolComFunil({ storeRow: { src: 'fb' } });
-  const venda = { txId: 'T6', sck: 'idx_abc', src: 'fb', paid: true, value: 10, total: 10, origem: 'digistore24' };
+  const venda = { txId: 'T6', sck: 'idx_abc', src: 'fb', paid: true, status: 'paid', value: 10, total: 10, origem: 'digistore24' };
   const r = await processarVenda(pool, venda);
   assert.strictEqual(r.ok, true);
   const eventLog = pool.calls.find(c => c.text.includes('INSERT INTO event_log'));
@@ -158,7 +161,7 @@ test('enviarMeta false nao chama a Meta mesmo com venda paga e funil resolvido',
 
   const pool = fakePoolComSlug();
   const venda = { txId: 'ds24a_2', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null,
-    paid: true, value: 51, total: 97, enviarMeta: false, origem: 'digistore24_afiliado' };
+    paid: true, status: 'paid', value: 51, total: 97, enviarMeta: false, origem: 'digistore24_afiliado' };
   const r = await processarVenda(pool, venda);
   assert.strictEqual(chamou, false, 'a CAPI nao podia ter sido chamada');
   assert.strictEqual(r.motivo, 'produto_nao_envia_meta');
@@ -225,12 +228,15 @@ test('venda de teste grava o marcador e nunca chama a Meta, mesmo com funil e pi
   assert.ok(calls.some(c => c.text.includes('SET capi_response') && c.params[0].includes('modo_teste')));
 });
 
-test('o upsert de sales nao deixa paid regredir para pending nem terminal voltar a paid', async () => {
+// Substitui o teste antigo das duas transicoes proibidas: a regra de posto cobre as duas e
+// tambem paid -> canceled/expired e refunded -> refused, que passavam.
+test('status so anda para frente: posto paid 1, refunded/chargeback 2, resto 0; test nunca sobrescreve status real', async () => {
   const pool = fakePool();
   await processarVenda(pool, { txId: 'tx', status: 'paid', paid: true, value: 1 });
   const sql = pool.calls.find(c => c.text.includes('INSERT INTO sales')).text;
-  assert.ok(/sales\.status IN \('refunded','chargeback'\)/.test(sql));
-  assert.ok(/sales\.status = 'paid' AND EXCLUDED\.status IN \('pending','waiting_payment'\)/.test(sql));
+  assert.ok(/CASE WHEN EXCLUDED\.status = 'paid' THEN 1 WHEN EXCLUDED\.status IN \('refunded','chargeback'\) THEN 2 ELSE 0 END\)\s*<\s*\(CASE WHEN sales\.status = 'paid' THEN 1 WHEN sales\.status IN \('refunded','chargeback'\) THEN 2 ELSE 0 END\)\s*THEN sales\.status/.test(sql));
+  assert.ok(/WHEN EXCLUDED\.status = 'test' THEN COALESCE\(sales\.status, EXCLUDED\.status\)/.test(sql));
+  assert.ok(/RETURNING status/.test(sql));
 });
 
 test('refunded_at e gravado quando a venda vira refunded/chargeback, e so na primeira vez', async () => {
@@ -258,7 +264,7 @@ test('venda paga vai para cada pixel TikTok do dominio, com plataforma tiktok no
                  { id: 2, pixel_code: 'CA2', access_token: 'k2', domain: 'x.com', active: true }],
     produtoRow: produtoTikTok,
   });
-  const venda = { txId: 'T7', sck: 'idx_abc', src: 'tt', paid: true, value: 50, total: 50, origem: 'payt', email: 'a@b.com', productCode: 'P1' };
+  const venda = { txId: 'T7', sck: 'idx_abc', src: 'tt', paid: true, status: 'paid', value: 50, total: 50, origem: 'payt', email: 'a@b.com', productCode: 'P1' };
   const r = await processarVenda(pool, venda);
   assert.strictEqual(r.ok, true);
 
@@ -286,7 +292,7 @@ test('produto com send_to_tiktok=false nao vai para a TikTok (mas vai para a Met
     tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
     produtoRow: { ...produtoTikTok, send_to_tiktok: false },
   });
-  await processarVenda(pool, { txId: 'T8', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  await processarVenda(pool, { txId: 'T8', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode: 'P1' });
   assert.ok(urls.some(u => u.includes('graph.facebook.com')));
   assert.ok(!urls.some(u => u.includes('business-api.tiktok.com')));
 });
@@ -305,7 +311,7 @@ test('TikTok fora do ar nao derruba a venda nem a Meta; event_log com status 0',
     tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
     produtoRow: produtoTikTok,
   });
-  const r = await processarVenda(pool, { txId: 'T9', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  const r = await processarVenda(pool, { txId: 'T9', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode: 'P1' });
   assert.strictEqual(r.ok, true);
   const tt = pool.calls.filter(c => c.text.includes('INSERT INTO event_log') && c.text.includes("'tiktok'"));
   assert.strictEqual(tt.length, 1);
@@ -331,7 +337,7 @@ test('produto nao cadastrado nao vai para a TikTok, mesmo com pixels no dominio'
       storeRow: { src: 'x' }, clickRow: { sck: 'idx_abc', user_agent: 'UA', ip: '1.1.1.1', created_at: new Date() },
       tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
     });
-    await processarVenda(pool, { txId: 'T10', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode });
+    await processarVenda(pool, { txId: 'T10', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode });
   }
   assert.ok(urls.some(u => u.includes('graph.facebook.com')));
   assert.ok(!urls.some(u => u.includes('business-api.tiktok.com')));
@@ -350,7 +356,7 @@ test('TikTok rejeita com HTTP 200 e code != 0: event_log grava status 0', async 
     tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }],
     produtoRow: produtoTikTok,
   });
-  await processarVenda(pool, { txId: 'T11', sck: 'idx_abc', paid: true, value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  await processarVenda(pool, { txId: 'T11', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode: 'P1' });
   const tt = pool.calls.filter(c => c.text.includes('INSERT INTO event_log') && c.text.includes("'tiktok'"));
   assert.strictEqual(tt.length, 1);
   assert.strictEqual(tt[0].params[3], 0);
@@ -391,7 +397,10 @@ test('sem clique pelo sck, a venda usa os utm_* que a PayT recebeu para atribuir
   assert.deepStrictEqual(a.slice(12, 17), ['FB', null, '120257057544780768', '120257057544760768', '120257057578940768']);
 });
 
-test('clique com campanha continua vencendo os utm_* da PayT', async () => {
+// Inverte o teste antigo "clique com campanha continua vencendo os utm_* da PayT": a URL do
+// checkout e o anuncio que trouxe ESTA compra; o clique do mesmo sck pode ser de dias antes,
+// de outra campanha.
+test('utm_* da URL do checkout com campanha vencem clique antigo de outra campanha', async () => {
   const calls = [];
   const clique = { sck: 'idx_c', utm_source: 'FB', utm_campaign: 'Camp', campaign_id: 'C1', adset_id: 'S1', ad_id: 'A1' };
   const pool = { calls, async query(text, params) {
@@ -401,7 +410,7 @@ test('clique com campanha continua vencendo os utm_* da PayT', async () => {
   } };
   await processarVenda(pool, { txId: 'T10', sck: 'idx_c', paid: false, value: 0, total: 0, origem: 'payt',
     utms: { utm_source: 'FB', utm_campaign: 'Outra|999999' } });
-  assert.deepStrictEqual(insertSalesArgs(calls).slice(12, 17), ['FB', 'Camp', 'C1', 'S1', 'A1']);
+  assert.deepStrictEqual(insertSalesArgs(calls).slice(12, 17), ['FB', 'Outra', '999999', null, null]);
 });
 
 test('utm_* malformado da PayT (% solto) nunca impede a venda de ser gravada', async () => {
@@ -414,4 +423,129 @@ test('utm_* malformado da PayT (% solto) nunca impede a venda de ser gravada', a
   const a = insertSalesArgs(pool.calls);
   assert.ok(a, 'INSERT INTO sales aconteceu');
   assert.ok(a[14] == null, "sem campanha");
+});
+
+// ---- auditoria 2026-10-14: venda-mae, clique com campanha, utm_url, Purchase so na transicao
+
+test('upsell sem sck nem utms herda o sck, a campanha e o funil da venda-mae', async () => {
+  const calls = [];
+  const mae = { sck: 'idx_pai', utm_source: 'FB', utm_campaign: 'Camp', campaign_id: '111111', adset_id: '222222', ad_id: '333333', funnel_id: 1 };
+  const funil = { id: 1, slug: 'x-fb1', domain: 'x.com', currency: 'BRL', active: true };
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    if (text.includes('upsell_from = $2')) return { rows: [mae] };
+    if (text.includes('SELECT * FROM funnels WHERE id=$1')) return { rows: [funil] };
+    return { rows: [] };
+  } };
+  await processarVenda(pool, { txId: 'UP1', sck: null, upsellFrom: 'PAI1', paid: false, status: 'waiting_payment',
+    value: 0, total: 0, origem: 'payt' });
+  const a = insertSalesArgs(calls);
+  assert.strictEqual(a[2], 'idx_pai');
+  assert.deepStrictEqual(a.slice(12, 17), ['FB', 'Camp', '111111', '222222', '333333']);
+  assert.strictEqual(a[17], 1, 'sem funil pelo store, vale o funil da mae');
+  assert.deepStrictEqual(calls.find(c => c.text.includes('upsell_from = $2')).params, ['UP1', 'PAI1']);
+});
+
+test('clique com campanha vence clique mais novo sem campanha do mesmo sck', async () => {
+  const calls = [];
+  const recente = { sck: 'idx_c', utm_source: 'ig', campaign_id: null, user_agent: 'UA' };
+  const comCampanha = { sck: 'idx_c', utm_source: 'FB', utm_campaign: 'C', campaign_id: '444444', adset_id: '555555', ad_id: '666666' };
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    if (text.includes('FROM clicks') && text.includes('campaign_id IS NOT NULL')) return { rows: [comCampanha] };
+    if (text.includes('FROM clicks WHERE sck=$1')) return { rows: [recente] };
+    return { rows: [] };
+  } };
+  await processarVenda(pool, { txId: 'T30', sck: 'idx_c', paid: false, status: 'pending', value: 0, total: 0, origem: 'payt' });
+  assert.deepStrictEqual(insertSalesArgs(calls).slice(12, 17), ['FB', 'C', '444444', '555555', '666666']);
+});
+
+test('utm_url grava o JSON dos utm_* do checkout; sem utms, null', async () => {
+  const utms = { utm_source: 'FB', utm_campaign: 'Camp|123456' };
+  const com = fakePool();
+  await processarVenda(com, { txId: 'T31', sck: null, paid: false, status: 'pending', value: 0, total: 0, origem: 'payt', utms });
+  assert.strictEqual(insertSalesArgs(com.calls)[27], JSON.stringify(utms));
+  const sem = fakePool();
+  await processarVenda(sem, { txId: 'T32', sck: null, paid: false, status: 'pending', value: 0, total: 0, origem: 'digistore24' });
+  assert.strictEqual(insertSalesArgs(sem.calls)[27], null);
+});
+
+test('pago_em: hora do servidor na primeira vez que a venda fica paid, nunca depois do reembolso', async () => {
+  const pool = fakePool();
+  await processarVenda(pool, { txId: 'T33', status: 'paid', paid: true, value: 1 });
+  const sql = pool.calls.find(c => c.text.includes('INSERT INTO sales')).text;
+  assert.ok(/CASE WHEN \$5 = 'paid' THEN now\(\) END/.test(sql));
+  assert.ok(/pago_em = CASE\s+WHEN sales\.pago_em IS NULL AND EXCLUDED\.status = 'paid'\s+AND COALESCE\(sales\.status, ''\) NOT IN \('paid','refunded','chargeback'\) THEN now\(\)\s+ELSE sales\.pago_em END/.test(sql));
+  assert.ok(/utm_url = COALESCE\(sales\.utm_url, EXCLUDED\.utm_url\)/.test(sql));
+});
+
+test('Purchase so na transicao: venda ja paga e ja enviada nao reenvia (nem TikTok)', async (t) => {
+  const fetchOriginal = global.fetch; let chamadas = 0;
+  global.fetch = async () => { chamadas++; return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'fb' }, clickRow: null,
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }], produtoRow: produtoTikTok,
+    antes: { status: 'paid', capi_sent: true },
+  });
+  const r = await processarVenda(pool, { txId: 'T34', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  assert.strictEqual(chamadas, 0, 'nenhuma chamada a Meta nem a TikTok');
+  assert.strictEqual(r.motivo, 'ja_enviada');
+  assert.ok(!pool.calls.some(c => c.text.includes('capi_response')), 'capi_response da primeira vez fica intacto');
+  assert.ok(insertSalesArgs(pool.calls), 'a venda continua gravada');
+});
+
+test('paid gravado com capi_sent falso reenvia o Purchase, mas nao o CompletePayment', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url) => { urls.push(url); return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'fb' }, clickRow: null,
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }], produtoRow: produtoTikTok,
+    antes: { status: 'paid', capi_sent: false },
+  });
+  await processarVenda(pool, { txId: 'T35', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  assert.ok(urls.some(u => u.includes('graph.facebook.com')));
+  assert.ok(!urls.some(u => u.includes('business-api.tiktok.com')));
+});
+
+test('paid depois de reembolso nao vira Purchase: o banco ficou com refunded', async (t) => {
+  const fetchOriginal = global.fetch; let chamadas = 0;
+  global.fetch = async () => { chamadas++; return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+  const pool = fakePoolComFunil({
+    storeRow: { src: 'fb' }, clickRow: null,
+    tiktokRows: [{ id: 1, pixel_code: 'CA1', access_token: 'k1' }], produtoRow: produtoTikTok,
+    antes: { status: 'refunded', capi_sent: true }, retorno: { status: 'refunded' },
+  });
+  const r = await processarVenda(pool, { txId: 'T36', sck: 'idx_abc', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt', productCode: 'P1' });
+  assert.strictEqual(chamadas, 0);
+  assert.strictEqual(r.motivo, 'status_refunded');
+});
+
+test('produto de funil inativo continua valendo: a consulta nao exige f.active e prefere o ativo', async () => {
+  const pool = fakePool();
+  await processarVenda(pool, { txId: 'T37', sck: null, paid: false, status: 'pending', value: 0, total: 0, origem: 'payt', productCode: 'P1' });
+  const q = pool.calls.find(c => c.text.includes('FROM products pr')).text;
+  assert.ok(!q.includes('AND f.active'));
+  assert.ok(/ORDER BY f\.active DESC/.test(q));
+});
+
+test('leituras novas que falham (mae, clique com campanha, estado anterior) nunca impedem a venda', async (t) => {
+  const fetchOriginal = global.fetch; const urls = [];
+  global.fetch = async (url) => { urls.push(url); return { status: 200, json: async () => ({}) }; };
+  const avisoOriginal = console.warn; console.warn = () => {};
+  t.after(() => { global.fetch = fetchOriginal; console.warn = avisoOriginal; });
+  const base = fakePoolComFunil({ storeRow: { src: 'fb' }, clickRow: { sck: 'idx_abc', campaign_id: null, user_agent: 'UA', created_at: new Date() } });
+  const pool = { calls: base.calls, async query(text, params) {
+    if (text.includes('upsell_from = $2') || (text.includes('FROM clicks') && text.includes('campaign_id IS NOT NULL')) || text.includes('SELECT status, capi_sent FROM sales')) {
+      base.calls.push({ text, params });
+      throw new Error('banco fora');
+    }
+    return base.query(text, params);
+  } };
+  const r = await processarVenda(pool, { txId: 'T38', sck: 'idx_abc', upsellFrom: 'PAI', paid: true, status: 'paid', value: 10, total: 10, origem: 'payt' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(insertSalesArgs(pool.calls)[2], 'idx_abc');
+  assert.ok(urls.some(u => u.includes('graph.facebook.com')), 'sem o estado anterior, envia como hoje');
 });
