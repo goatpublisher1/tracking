@@ -14,7 +14,7 @@ const { normalizeUtms, clickIds, ttpDe } = require('./normalize');
 const { enviarIC, enviarICTikTok } = require('./ic');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
-const { processarVenda } = require('./vendas');
+const { processarVenda, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE } = require('./vendas');
 const { varianteDaAssinatura, normalizarDigistore } = require('./digistore24');
 const { normalizarAfiliado } = require('./digistore24-afiliado');
 
@@ -47,30 +47,11 @@ async function herdarTipoDoProduto() {
         WHERE p.product_code = s.product_code AND p.active
           AND s.offer_type IS DISTINCT FROM p.offer_type`);
     if (r.rowCount) console.log('OFFER_TYPE_HERDADO', r.rowCount);
-    // Venda sem funil (sem sck e produto ainda nao cadastrado na hora — tipico de recuperacao)
-    // ganha o funil do produto. So preenche vazio: funil ja resolvido pelo sck nao muda.
-    // Sem exigir f.active (produto continua no funil antigo depois da troca de dominio, como em
-    // vendas.js), mas o ativo vem primeiro; DISTINCT ON deixa um funil por produto.
-    const f = await pool.query(
-      `UPDATE sales s SET funnel_id = pf.funnel_id
-         FROM (SELECT DISTINCT ON (p.product_code) p.product_code, f.id AS funnel_id
-                 FROM products p JOIN funnels f ON f.slug = p.funnel_slug
-                WHERE p.active
-                ORDER BY p.product_code, f.active DESC NULLS LAST) pf
-        WHERE pf.product_code = s.product_code AND s.funnel_id IS NULL`);
+    // Os dois UPDATEs abaixo moram em vendas.js para o scripts/verifica-sql.js conferir o texto
+    // com EXPLAIN antes do deploy (este arquivo sobe o servidor e nao pode ser importado).
+    const f = await pool.query(SQL_HERDA_FUNIL_VENDA);
     if (f.rowCount) console.log('FUNNEL_ID_HERDADO', f.rowCount);
-    // Clique gravado sem funil (/collect chamado por um host que nao casou com o cadastro) nao
-    // aparece em nenhum funil do dashboard. O dominio da pagina (landing_url) diz qual era: host em
-    // minusculas, sem track. nem www., como em funnelByDomain. 7 dias: o que ficou para tras disso
-    // nao e mais de campanha em andamento. Varios funis ativos no dominio: o de menor id.
-    const c = await pool.query(
-      `UPDATE clicks c SET funnel_id = fd.id
-         FROM (SELECT DISTINCT ON (dominio) id, dominio
-                 FROM (SELECT id, regexp_replace(lower(domain), '^(track\\.)?(www\\.)?', '') AS dominio
-                         FROM funnels WHERE active AND domain IS NOT NULL) a
-                ORDER BY dominio, id) fd
-        WHERE c.funnel_id IS NULL AND c.created_at > now() - interval '7 days'
-          AND fd.dominio = regexp_replace(substring(lower(c.landing_url) from '^[a-z][a-z0-9+.-]*://([^/:?#]+)'), '^(track\\.)?(www\\.)?', '')`);
+    const c = await pool.query(SQL_HERDA_FUNIL_CLIQUE);
     if (c.rowCount) console.log('FUNNEL_CLIQUE_HERDADO', c.rowCount);
   } catch (err) { console.error('OFFER_TYPE_HERDADO_ERRO', err); }
 }

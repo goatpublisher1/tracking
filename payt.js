@@ -64,7 +64,13 @@ function normalizarPayt(payload) {
   const paid = p?.transaction?.payment_status === 'paid' || p?.status === 'paid';
   // sem || null no final: a posicao 5 do INSERT original nao tinha esse
   // fallback, e string vazia/0/false em p.status precisa sobreviver intacto.
-  const status = p?.transaction?.payment_status || p?.status;
+  // Venda paga grava 'paid' mesmo com o outro campo diferente ('approved' etc.): o Purchase
+  // depende do status GRAVADO (vendas.js), e o primeiro Purchase nao pode ficar preso nisso.
+  // Excecao: payment_status de reembolso/chargeback continua vencendo, como hoje — virar 'paid'
+  // esconderia o reembolso.
+  const pagamento = p?.transaction?.payment_status;
+  const status = paid && pagamento !== 'refunded' && pagamento !== 'chargeback'
+    ? 'paid' : (pagamento || p?.status);
 
   // value = comissao do PRODUTOR (busca por type, nao indice fixo)
   const producerComm = Array.isArray(p?.commission)

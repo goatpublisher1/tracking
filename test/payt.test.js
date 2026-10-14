@@ -111,3 +111,14 @@ test('utms: le os utm_* que a PayT recebeu na URL do checkout; sem eles, null', 
   assert.deepStrictEqual(v.utms, { utm_source: 'FB', utm_campaign: 'Camp|111', utm_medium: 'Conj|222', utm_content: 'Ad|333', utm_term: 'Instagram_Reels' });
   assert.strictEqual(normalizarPayt(payload).utms, null);
 });
+
+// ---- auditoria 2026-10-14: o Purchase depende do status gravado
+test('venda paga grava status paid mesmo com payment_status diferente; reembolso continua vencendo', () => {
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'approved' } }).status, 'paid');
+  assert.strictEqual(normalizarPayt({ transaction: { payment_status: 'paid' }, status: 'pending' }).status, 'paid');
+  // virar 'paid' esconderia o reembolso: o terminal do payment_status fica, como hoje
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'refunded' } }).status, 'refunded');
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'chargeback' } }).status, 'chargeback');
+  assert.strictEqual(normalizarPayt({ status: 'paid', test: true, transaction: { payment_status: 'approved' } }).status, 'test');
+  assert.strictEqual(normalizarPayt({ status: 'waiting_payment', transaction: { payment_status: 'pending' } }).status, 'pending');
+});

@@ -7,6 +7,109 @@ const { sendPurchase, temPixel } = require('./capi');
 const { sendCompletePayment } = require('./tiktok');
 const { normalizeUtms } = require('./normalize');
 
+// Upsert da venda. Constante exportada para o scripts/verifica-sql.js conferir o texto com EXPLAIN
+// no banco de producao antes do deploy, sem gravar nada (coluna faltando = toda venda perdida).
+const SQL_UPSERT_VENDA = `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
+     currency, product_code, product_name, customer_email, customer_phone,
+     utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
+     payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma,
+     refunded_at, pago_em, utm_url)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
+     CASE WHEN $5 IN ('refunded','chargeback') THEN now() END,
+     CASE WHEN $5 = 'paid' THEN now() END, $28)
+   ON CONFLICT (transaction_id) DO UPDATE SET
+     -- status so anda para frente, por posto: 0 = qualquer nao pago, 1 = paid,
+     -- 2 = refunded/chargeback. Webhook atrasado ou reapresentado nao desfaz pagamento nem
+     -- reembolso (paid -> canceled/expired tambem passava); no mesmo posto vale o mais novo.
+     -- 'test' nunca sobrescreve status real.
+     status = CASE
+       WHEN EXCLUDED.status = 'test' THEN COALESCE(sales.status, EXCLUDED.status)
+       WHEN (CASE WHEN EXCLUDED.status = 'paid' THEN 1 WHEN EXCLUDED.status IN ('refunded','chargeback') THEN 2 ELSE 0 END)
+          < (CASE WHEN sales.status = 'paid' THEN 1 WHEN sales.status IN ('refunded','chargeback') THEN 2 ELSE 0 END)
+         THEN sales.status
+       ELSE EXCLUDED.status END,
+     event_id = EXCLUDED.event_id,
+     -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
+     value = GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0)),
+     total_price = GREATEST(COALESCE(EXCLUDED.total_price,0), COALESCE(sales.total_price,0)),
+     -- atribuicao: o PRIMEIRO valor nao-nulo vence (o clique original e a verdade)
+     sck = COALESCE(sales.sck, EXCLUDED.sck),
+     src = COALESCE(sales.src, EXCLUDED.src),
+     funnel_id = COALESCE(sales.funnel_id, EXCLUDED.funnel_id),
+     -- as cinco colunas da campanha andam juntas: venda gravada sem campanha (webhook pendente
+     -- antes do clique casar, upsell antes da mae) ganha as cinco do webhook seguinte que tiver
+     -- campanha. Com COALESCE coluna a coluna, a utm_source do clique sem campanha ficava ao
+     -- lado do campaign_id do outro. Venda com campanha A nunca recebe o conjunto/anuncio de
+     -- outra campanha (nem de fonte sem campanha); da mesma campanha, completa o que faltava.
+     utm_source = CASE
+       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.utm_source
+       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_source
+       ELSE COALESCE(sales.utm_source, EXCLUDED.utm_source) END,
+     utm_campaign = CASE
+       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.utm_campaign
+       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_campaign
+       ELSE COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign) END,
+     campaign_id = CASE
+       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.campaign_id
+       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.campaign_id
+       ELSE COALESCE(sales.campaign_id, EXCLUDED.campaign_id) END,
+     adset_id = CASE
+       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.adset_id
+       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.adset_id
+       ELSE COALESCE(sales.adset_id, EXCLUDED.adset_id) END,
+     ad_id = CASE
+       WHEN sales.campaign_id IS NOT NULL AND sales.campaign_id IS DISTINCT FROM EXCLUDED.campaign_id THEN sales.ad_id
+       WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.ad_id
+       ELSE COALESCE(sales.ad_id, EXCLUDED.ad_id) END,
+     utm_url = COALESCE(sales.utm_url, EXCLUDED.utm_url),
+     city = COALESCE(sales.city, EXCLUDED.city),
+     state = COALESCE(sales.state, EXCLUDED.state),
+     country = COALESCE(sales.country, EXCLUDED.country),
+     customer_ip = COALESCE(sales.customer_ip, EXCLUDED.customer_ip),
+     -- estado da transacao: o MAIS RECENTE nao-nulo vence
+     customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
+     customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
+     offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
+     payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
+     paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at),
+     -- a hora em que a venda virou reembolso/chargeback: so na primeira vez, e nunca apagada
+     refunded_at = CASE
+       WHEN sales.refunded_at IS NULL AND EXCLUDED.status IN ('refunded','chargeback') THEN now()
+       ELSE sales.refunded_at END,
+     -- pago_em: hora do servidor em que a venda virou paid (o paid_at da PayT vem 3h adiantado e
+     -- a Digistore24 nao manda). So na transicao: venda que ja estava paid antes desta coluna
+     -- existir fica nula (o dashboard cai no created_at), em vez de ganhar a hora de um reenvio
+     -- dias depois; e paid atrasado sobre reembolso nao conta.
+     pago_em = CASE
+       WHEN sales.pago_em IS NULL AND EXCLUDED.status = 'paid'
+         AND COALESCE(sales.status, '') NOT IN ('paid','refunded','chargeback') THEN now()
+       ELSE sales.pago_em END
+   RETURNING status`;
+
+// Backfills horarios do server.js (moram aqui pelo mesmo motivo: o verifica-sql.js le daqui).
+// Venda sem funil (sem sck e produto ainda nao cadastrado na hora — tipico de recuperacao) ganha
+// o funil do produto. So preenche vazio: funil ja resolvido pelo sck nao muda. Sem exigir
+// f.active (produto continua no funil antigo depois da troca de dominio, como no webhook), mas o
+// ativo vem primeiro; DISTINCT ON deixa um funil por produto, f.id desempata sempre igual.
+const SQL_HERDA_FUNIL_VENDA = `UPDATE sales s SET funnel_id = pf.funnel_id
+     FROM (SELECT DISTINCT ON (p.product_code) p.product_code, f.id AS funnel_id
+             FROM products p JOIN funnels f ON f.slug = p.funnel_slug
+            WHERE p.active
+            ORDER BY p.product_code, f.active DESC NULLS LAST, f.id) pf
+    WHERE pf.product_code = s.product_code AND s.funnel_id IS NULL`;
+
+// Clique gravado sem funil (/collect chamado por um host que nao casou com o cadastro) nao
+// aparece em nenhum funil do dashboard. O dominio da pagina (landing_url) diz qual era: host em
+// minusculas, sem track. nem www., como em funnelByDomain. 7 dias: o que ficou para tras disso
+// nao e mais de campanha em andamento. Varios funis ativos no dominio: o de menor id.
+const SQL_HERDA_FUNIL_CLIQUE = `UPDATE clicks c SET funnel_id = fd.id
+     FROM (SELECT DISTINCT ON (dominio) id, dominio
+             FROM (SELECT id, regexp_replace(lower(domain), '^(track\\.)?(www\\.)?', '') AS dominio
+                     FROM funnels WHERE active AND domain IS NOT NULL) a
+            ORDER BY dominio, id) fd
+    WHERE c.funnel_id IS NULL AND c.created_at > now() - interval '7 days'
+      AND fd.dominio = regexp_replace(substring(lower(c.landing_url) from '^[a-z][a-z0-9+.-]*://([^/:?#]+)'), '^(track\\.)?(www\\.)?', '')`;
+
 async function processarVenda(pool, venda) {
   const { txId, sck, paid, value, total } = venda;
 
@@ -72,22 +175,28 @@ async function processarVenda(pool, venda) {
   // TikTok: produto NAO cadastrado nao vai (o upload nao se desfaz; omissao e o
   // lado seguro). Cadastrado, segue send_to_tiktok.
   let sendToTikTok = false;
+  let produtoCadastrado = false;
   if (venda.productCode) {
     // Sem `AND f.active`: quando o dominio troca, o funil antigo e desativado mas o produto continua
     // cadastrado nele — e eram o offer_type e o send_to_* dele que sumiam (o upsell perdia o tipo e
-    // ia para a Meta). O ativo, se houver, vem primeiro.
+    // ia para a Meta). O ativo, se houver, vem primeiro; f.id desempata sempre igual.
     const pr = await pool.query(
       `SELECT pr.offer_type, pr.send_to_meta, pr.send_to_tiktok, f.* FROM products pr
        JOIN funnels f ON f.slug = pr.funnel_slug
        WHERE pr.product_code = $1 AND pr.active
-       ORDER BY f.active DESC NULLS LAST LIMIT 1`, [venda.productCode]);
+       ORDER BY f.active DESC NULLS LAST, f.id LIMIT 1`, [venda.productCode]);
     if (pr.rows[0]) {
+      produtoCadastrado = true;
       offerType = pr.rows[0].offer_type;
       sendToMeta = pr.rows[0].send_to_meta !== false;
       sendToTikTok = pr.rows[0].send_to_tiktok === true;
       if (!funnel) funnel = pr.rows[0];
     }
   }
+  // "Nao cadastrado = envia" vale para a venda principal. Upsell/order bump nao cadastrado (achou
+  // a mae) nao vai para a Meta: sem cadastro nao ha send_to_meta para respeitar, e herdar o sck da
+  // mae nao pode fazer a venda filha inflar a otimizacao. TikTok ja fica fora (nao cadastrado).
+  if (!produtoCadastrado && mae) sendToMeta = false;
 
   // Terminal, e por isso vem depois do bloco acima: comissao de produto de
   // terceiro nao vai para a Meta nem se alguem cadastrar esse produto com
@@ -114,6 +223,17 @@ async function processarVenda(pool, venda) {
     ativosSemPixel = (all.rows || []).length > 0 && funnels.length === 0;
   }
 
+  // Como a venda estava ANTES deste webhook. PayT e Digistore24 reapresentam o mesmo webhook, e
+  // cada reenvio virava outro Purchase (a dedupe da Meta por event_id so cobre 48h). created_at
+  // e a hora da venda, que limita o clique com campanha abaixo num reenvio dias depois.
+  // try: se a leitura falhar, a venda segue como hoje (envia).
+  let antes = null;
+  try {
+    antes = (await pool.query('SELECT status, capi_sent, created_at FROM sales WHERE transaction_id=$1', [txId])).rows[0] || null;
+  } catch (e) {
+    console.warn('VENDA_ANTES_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
+  }
+
   // ---- dados do browser gravados no checkout
   let store = null;
   let click = null;
@@ -126,12 +246,13 @@ async function processarVenda(pool, venda) {
     click = c.rows[0] || null;
     // O clique mais recente pode ser uma volta sem anuncio (aba reaberta, link da bio) depois do
     // clique pago, e apagava a campanha da venda. Para a atribuicao vale o ultimo clique COM
-    // campanha ate a venda; o mais recente continua sendo o do navegador na CAPI.
+    // campanha ate a venda (venda nova: agora); o mais recente continua sendo o do navegador na CAPI.
     if (click && !click.campaign_id) {
       try {
         const cc = await pool.query(
-          `SELECT * FROM clicks WHERE sck=$1 AND campaign_id IS NOT NULL AND created_at <= now()
-            ORDER BY created_at DESC LIMIT 1`, [sckEfetivo]);
+          `SELECT * FROM clicks WHERE sck=$1 AND campaign_id IS NOT NULL
+              AND created_at <= COALESCE($2::timestamptz, now())
+            ORDER BY created_at DESC LIMIT 1`, [sckEfetivo, antes?.created_at ?? null]);
         cliqueComCampanha = cc.rows[0] || null;
       } catch (e) {
         console.warn('CLIQUE_COM_CAMPANHA_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
@@ -162,77 +283,7 @@ async function processarVenda(pool, venda) {
   const atrib = comCampanha(daUrl) || comCampanha(cliqueComCampanha) || comCampanha(click)
     || comCampanha(mae) || click || daUrl || null;
 
-  // Como a venda estava ANTES deste webhook. PayT e Digistore24 reapresentam o mesmo webhook, e
-  // cada reenvio virava outro Purchase (a dedupe da Meta por event_id so cobre 48h).
-  // try: se a leitura falhar, a venda segue como hoje (envia).
-  let antes = null;
-  try {
-    antes = (await pool.query('SELECT status, capi_sent FROM sales WHERE transaction_id=$1', [txId])).rows[0] || null;
-  } catch (e) {
-    console.warn('VENDA_ANTES_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
-  }
-
-  const retorno = await pool.query(
-    `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
-       currency, product_code, product_name, customer_email, customer_phone,
-       utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id, offer_type,
-       payment_method, paid_at, upsell_from, city, state, country, customer_ip, plataforma,
-       refunded_at, pago_em, utm_url)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,
-       CASE WHEN $5 IN ('refunded','chargeback') THEN now() END,
-       CASE WHEN $5 = 'paid' THEN now() END, $28)
-     ON CONFLICT (transaction_id) DO UPDATE SET
-       -- status so anda para frente, por posto: 0 = qualquer nao pago, 1 = paid,
-       -- 2 = refunded/chargeback. Webhook atrasado ou reapresentado nao desfaz pagamento nem
-       -- reembolso (paid -> canceled/expired tambem passava); no mesmo posto vale o mais novo.
-       -- 'test' nunca sobrescreve status real.
-       status = CASE
-         WHEN EXCLUDED.status = 'test' THEN COALESCE(sales.status, EXCLUDED.status)
-         WHEN (CASE WHEN EXCLUDED.status = 'paid' THEN 1 WHEN EXCLUDED.status IN ('refunded','chargeback') THEN 2 ELSE 0 END)
-            < (CASE WHEN sales.status = 'paid' THEN 1 WHEN sales.status IN ('refunded','chargeback') THEN 2 ELSE 0 END)
-           THEN sales.status
-         ELSE EXCLUDED.status END,
-       event_id = EXCLUDED.event_id,
-       -- valor: nunca deixa um 0 (webhook pre-pagamento) apagar o valor real
-       value = GREATEST(COALESCE(EXCLUDED.value,0), COALESCE(sales.value,0)),
-       total_price = GREATEST(COALESCE(EXCLUDED.total_price,0), COALESCE(sales.total_price,0)),
-       -- atribuicao: o PRIMEIRO valor nao-nulo vence (o clique original e a verdade)
-       sck = COALESCE(sales.sck, EXCLUDED.sck),
-       src = COALESCE(sales.src, EXCLUDED.src),
-       funnel_id = COALESCE(sales.funnel_id, EXCLUDED.funnel_id),
-       -- as cinco colunas da campanha andam juntas: venda gravada sem campanha (webhook pendente
-       -- antes do clique casar, upsell antes da mae) ganha as cinco do webhook seguinte que tiver
-       -- campanha. Com COALESCE coluna a coluna, a utm_source do clique sem campanha ficava ao
-       -- lado do campaign_id do outro.
-       utm_source = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_source ELSE COALESCE(sales.utm_source, EXCLUDED.utm_source) END,
-       utm_campaign = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.utm_campaign ELSE COALESCE(sales.utm_campaign, EXCLUDED.utm_campaign) END,
-       campaign_id = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.campaign_id ELSE COALESCE(sales.campaign_id, EXCLUDED.campaign_id) END,
-       adset_id = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.adset_id ELSE COALESCE(sales.adset_id, EXCLUDED.adset_id) END,
-       ad_id = CASE WHEN sales.campaign_id IS NULL AND EXCLUDED.campaign_id IS NOT NULL THEN EXCLUDED.ad_id ELSE COALESCE(sales.ad_id, EXCLUDED.ad_id) END,
-       utm_url = COALESCE(sales.utm_url, EXCLUDED.utm_url),
-       city = COALESCE(sales.city, EXCLUDED.city),
-       state = COALESCE(sales.state, EXCLUDED.state),
-       country = COALESCE(sales.country, EXCLUDED.country),
-       customer_ip = COALESCE(sales.customer_ip, EXCLUDED.customer_ip),
-       -- estado da transacao: o MAIS RECENTE nao-nulo vence
-       customer_email = COALESCE(EXCLUDED.customer_email, sales.customer_email),
-       customer_phone = COALESCE(EXCLUDED.customer_phone, sales.customer_phone),
-       offer_type = COALESCE(EXCLUDED.offer_type, sales.offer_type),
-       payment_method = COALESCE(EXCLUDED.payment_method, sales.payment_method),
-       paid_at = COALESCE(EXCLUDED.paid_at, sales.paid_at),
-       -- a hora em que a venda virou reembolso/chargeback: so na primeira vez, e nunca apagada
-       refunded_at = CASE
-         WHEN sales.refunded_at IS NULL AND EXCLUDED.status IN ('refunded','chargeback') THEN now()
-         ELSE sales.refunded_at END,
-       -- pago_em: hora do servidor em que a venda virou paid (o paid_at da PayT vem 3h adiantado e
-       -- a Digistore24 nao manda). So na transicao: venda que ja estava paid antes desta coluna
-       -- existir fica nula (o dashboard cai no created_at), em vez de ganhar a hora de um reenvio
-       -- dias depois; e paid atrasado sobre reembolso nao conta.
-       pago_em = CASE
-         WHEN sales.pago_em IS NULL AND EXCLUDED.status = 'paid'
-           AND COALESCE(sales.status, '') NOT IN ('paid','refunded','chargeback') THEN now()
-         ELSE sales.pago_em END
-     RETURNING status`,
+  const retorno = await pool.query(SQL_UPSERT_VENDA,
     [txId, 'purchase_' + txId, sckEfetivo, srcFinal, venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,
@@ -248,6 +299,14 @@ async function processarVenda(pool, venda) {
   // O status que ficou gravado decide os envios abaixo: um 'paid' atrasado depois do reembolso
   // grava 'refunded' e nao pode virar Purchase. `?? venda.status`: pool sem RETURNING (testes).
   const statusFinal = retorno?.rows?.[0]?.status ?? venda.status;
+  // Sinais greppaveis: plataforma dizendo "pago" com outro status (o Purchase depende do status
+  // gravado), e upsert que manteve o status antigo (paid atrasado sobre reembolso, etc.).
+  if (paid && venda.status !== 'paid') {
+    console.warn('PAID_STATUS_DIVERGENTE', JSON.stringify({ tx: txId, origem: venda.origem, status: venda.status ?? null }));
+  }
+  if (statusFinal !== venda.status && venda.status !== 'test') {
+    console.warn('STATUS_MANTIDO', JSON.stringify({ tx: txId, recebido: venda.status ?? null, ficou: statusFinal ?? null }));
+  }
 
   // ---- CAPI para CADA pixel ativo do dominio (multi-conta)
   // Upsell/backend ficam no banco mas nao vao para a Meta, para nao inflar
@@ -283,10 +342,12 @@ async function processarVenda(pool, venda) {
   // Purchase so na transicao para paid, ou com paid gravado e capi_sent nao verdadeiro (a
   // primeira tentativa falhou e o reenvio do webhook e a segunda chance). capi_response fica
   // como estava nos dois pulos abaixo: e o registro do envio que valeu.
-  if (paid && antes?.status === 'paid' && antes?.capi_sent === true) {
-    motivoMeta = 'ja_enviada';
-  } else if (paid && statusFinal !== 'paid') {
+  // ja_enviada olha so o capi_sent: linha antiga que foi paid -> canceled (antes da regra de
+  // posto) com o Purchase ja enviado nao reenvia quando volta um paid.
+  if (paid && statusFinal !== 'paid') {
     motivoMeta = 'status_' + statusFinal;
+  } else if (paid && antes?.capi_sent === true) {
+    motivoMeta = 'ja_enviada';
   } else if (paid && funnels.length && sendToMeta) {
     const resultados = [];
     for (const f of funnels) {
@@ -344,8 +405,9 @@ async function processarVenda(pool, venda) {
   // ---- TikTok: depois da Meta, nunca no caminho dela. Um CompletePayment por
   // pixel TikTok ativo do dominio; falha vira log e linha no event_log (status 0).
   // Sem capi_sent do lado da TikTok: so na transicao para paid, nunca no reenvio do webhook.
-  if (paid && statusFinal === 'paid' && antes?.status !== 'paid' && funnel && sendToTikTok
-      && process.env.TIKTOK_EVENTS_DESLIGADO !== '1') {
+  // capi_sent verdadeiro = a venda ja passou por paid antes (e o CompletePayment teve a vez dele).
+  if (paid && statusFinal === 'paid' && antes?.status !== 'paid' && antes?.capi_sent !== true
+      && funnel && sendToTikTok && process.env.TIKTOK_EVENTS_DESLIGADO !== '1') {
     await enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, txId });
   }
 
@@ -386,4 +448,4 @@ async function enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, t
   }
 }
 
-module.exports = { processarVenda };
+module.exports = { processarVenda, SQL_UPSERT_VENDA, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE };
