@@ -48,12 +48,19 @@ async function verificaSql(pool, log = console.log) {
 }
 
 async function main() {
+  // Sem DATABASE_URL o pg tenta o Postgres local e falha com mensagem vazia: melhor dizer o que falta.
+  if (!process.env.DATABASE_URL) {
+    console.error('ERRO: defina DATABASE_URL (pelo tunel SSH, antes do merge; no container ela ja existe).');
+    process.exitCode = 1;
+    return;
+  }
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
     process.exitCode = (await verificaSql(pool)) ? 0 : 1;
   } catch (e) {
-    console.error('ERRO:', e.message);
+    // ECONNREFUSED chega como AggregateError, com message vazia: o code diz se o tunel esta fechado.
+    console.error('ERRO:', e.message || e.code || String(e));
     process.exitCode = 1;
   } finally {
     await pool.end();
