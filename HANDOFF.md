@@ -635,16 +635,28 @@ Corrige cliques e vendas gravados antes das regras novas: parâmetros automátic
 
 Rodar **depois do deploy do tracking** (antes, o código antigo continua gravando do jeito velho), nesta ordem:
 
-1. Simulação, não grava nada: `node scripts/reatribuir.js`. Mostra por funil quantos cliques mudam, quantas vendas ganham campanha (quantas pagas e a receita **só das pagas**), quantas têm ids limpos, quantas têm a fonte normalizada, e 10 exemplos.
-2. **Backup, antes do `--aplicar`:**
+1. **Índice em `clicks(sck)`, antes da primeira simulação.** O script busca todos os cliques dos `sck` das vendas; sem índice, cada busca varre a tabela inteira:
+   ```bash
+   node scripts/q.js "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'clicks' AND indexdef ILIKE '%(sck%'"
+   ```
+   Se não vier nenhuma linha, crie o índice fora do horário de pico (`CONCURRENTLY` não trava o `/collect`, mas pesa no banco) e só depois siga. Se o comando falhar no meio, fica um índice `INVALID`: `DROP INDEX CONCURRENTLY clicks_sck_idx` e crie de novo.
+   ```bash
+   node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS clicks_sck_idx ON clicks (sck)"
+   ```
+2. Simulação, não grava nada: `node scripts/reatribuir.js`. Mostra por funil quantos cliques mudam, quantas vendas ganham campanha (quantas pagas e a receita **só das pagas**), quantas têm ids limpos, quantas têm a fonte normalizada, e 10 exemplos. A linha "venda(s) e clique(s) com campanha gravada não numérica — não mexidas" conta as linhas que o script deixa como estão (`{campaignid}`, `Teste`); limpá-las é outra decisão.
+3. **Backup, antes do `--aplicar`:**
    ```bash
    node scripts/q.js "CREATE TABLE IF NOT EXISTS sales_reatrib_bkp AS SELECT transaction_id, utm_source, utm_campaign, campaign_id, adset_id, ad_id, now() AS copiado_em FROM sales WHERE created_at > now() - interval '91 days'"
    node scripts/q.js "CREATE TABLE IF NOT EXISTS clicks_reatrib_bkp AS SELECT sck, created_at, utm_source, campaign_id, adset_id, ad_id, now() AS copiado_em FROM clicks WHERE created_at > now() - interval '91 days'"
-   node scripts/q.js "SELECT (SELECT count(*) FROM sales_reatrib_bkp) AS vendas, (SELECT count(*) FROM clicks_reatrib_bkp) AS cliques, (SELECT min(copiado_em) FROM sales_reatrib_bkp) AS copiado_em"
+   node scripts/q.js "SELECT 'sales_reatrib_bkp' AS tabela, count(*) AS linhas, min(copiado_em) AS copiado_em FROM sales_reatrib_bkp UNION ALL SELECT 'clicks_reatrib_bkp', count(*), min(copiado_em) FROM clicks_reatrib_bkp"
    ```
-   Com `IF NOT EXISTS`, se a tabela já existe fica a cópia antiga (confira `copiado_em`): é ela que desfaz a primeira aplicação.
-3. `node scripts/reatribuir.js --aplicar`: grava numa transação (erro no meio: `ROLLBACK`, nada fica). Cada `UPDATE` só vale se a linha ainda tem o `campaign_id` lido (no clique, também o `ctid` e o `sck`); o que o webhook ou o backfill horário mexeu no meio fica como está e aparece como "linha(s) mudaram depois da leitura". Nesse caso, rode o `--aplicar` de novo.
-4. Simulação de novo: tem de dar `0 clique(s) e 0 venda(s)`.
+   O `copiado_em` das **duas** tabelas tem de ser de agora. Com `IF NOT EXISTS`, uma tabela que já existia fica com a cópia antiga. Se essa cópia é de uma rodada anterior que não vai mais ser desfeita, **apague as duas e crie de novo antes do `--aplicar`**; senão um "desfazer" depois voltaria semanas de gravações do webhook. Se a cópia antiga ainda pode servir para desfazer a rodada anterior, decida isso antes de apagar.
+   ```bash
+   node scripts/q.js "DROP TABLE IF EXISTS sales_reatrib_bkp, clicks_reatrib_bkp"
+   ```
+   Depois, rode de novo os dois `CREATE TABLE` e a conferência acima.
+4. `node scripts/reatribuir.js --aplicar`. Se faltar uma das duas tabelas de backup, ele recusa (`ERRO: --aplicar recusado…`, código de saída 1, nada gravado); a idade da cópia não é conferida, é o passo 3. Grava numa transação (erro no meio: `ROLLBACK`, nada fica). Cada `UPDATE` só vale se a linha ainda tem o que foi lido: na venda, as cinco colunas de atribuição; no clique, `ctid`, `sck`, `created_at` e `campaign_id`. O que o webhook ou o backfill horário mexeu no meio fica como está e aparece como "linha(s) mudaram depois da leitura". Nesse caso, rode o `--aplicar` de novo.
+5. Simulação de novo: tem de dar `0 clique(s) e 0 venda(s)`.
 
 **Desfazer** (volta as colunas da cópia; também desfaz o que o webhook gravou nessas linhas depois do backup, então desfaça logo):
 ```bash

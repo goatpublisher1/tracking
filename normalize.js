@@ -136,4 +136,4 @@ function ttpDe(b) {
   return v ? v.slice(0, 200) : null;
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo, idNumerico, FONTES_SITE_META };
+module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico };

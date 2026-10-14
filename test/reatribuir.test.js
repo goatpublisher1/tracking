@@ -88,7 +88,7 @@ test('utm_url (JSON do checkout) vem antes do src; id do src/utm so numerico (PN
 // Banco falso: guarda as linhas e responde as consultas do script pelo texto. As leituras de
 // selecao devolvem TODAS as linhas (mais do que o WHERE real), entao o JS tem de ignorar o que ja
 // esta certo. Os UPDATEs fazem o compare-and-set como o Postgres faria.
-function bancoFalso({ cliques = [], vendas = [], utmUrl = true } = {}) {
+function bancoFalso({ cliques = [], vendas = [], utmUrl = true, backup = ['sales_reatrib_bkp', 'clicks_reatrib_bkp'] } = {}) {
   const calls = [];
   cliques.forEach((c, i) => { c.ctid = `(0,${i + 1})`; });
   const copia = (rows) => rows.map((r) => ({ ...r }));
@@ -96,18 +96,25 @@ function bancoFalso({ cliques = [], vendas = [], utmUrl = true } = {}) {
     calls.push({ text, params });
     const q = text.trim();
     if (q.includes('information_schema')) return { rows: utmUrl ? [{ ok: 1 }] : [] };
+    if (q.includes('to_regclass')) {
+      const existe = (n) => (backup.includes(n) ? n : null);
+      return { rows: [{ vendas: existe('sales_reatrib_bkp'), cliques: existe('clicks_reatrib_bkp') }] };
+    }
     if (q.startsWith('UPDATE clicks')) {
-      const c = cliques.find((x) => x.ctid === params[4] && (x.sck ?? null) === params[5] && (x.campaign_id ?? null) === params[6]);
+      const c = cliques.find((x) => x.ctid === params[4] && (x.sck ?? null) === params[5]
+        && x.created_at.toISOString() === params[6] && (x.campaign_id ?? null) === params[7]);
       if (c) Object.assign(c, { utm_source: params[0], campaign_id: params[1], adset_id: params[2], ad_id: params[3] });
       return { rows: [], rowCount: c ? 1 : 0 };
     }
     if (q.startsWith('UPDATE sales')) {
-      const v = vendas.find((x) => x.transaction_id === params[5] && (x.campaign_id ?? null) === params[6]);
+      const v = vendas.find((x) => x.transaction_id === params[5]
+        && ['utm_source', 'utm_campaign', 'campaign_id', 'adset_id', 'ad_id'].every((k, i) => (x[k] ?? null) === params[6 + i]));
       if (v) Object.assign(v, { utm_source: params[0], utm_campaign: params[1], campaign_id: params[2], adset_id: params[3], ad_id: params[4] });
       return { rows: [], rowCount: v ? 1 : 0 };
     }
     if (q.includes('FROM clicks') && q.includes('sck = ANY')) return { rows: copia(cliques.filter((c) => params[0].includes(c.sck))) };
-    if (q.includes('FROM clicks')) return { rows: copia(cliques) };
+    // created_at::text do Postgres: aqui, o ISO (o que importa e voltar igual no UPDATE)
+    if (q.includes('FROM clicks')) return { rows: copia(cliques).map((c) => ({ ...c, created_at_lido: c.created_at.toISOString() })) };
     if (q.includes('upsell_from = ANY')) return { rows: copia(vendas.filter((v) => params[0].includes(v.transaction_id) || params[0].includes(v.upsell_from))) };
     if (q.includes('FROM sales')) return { rows: copia(vendas) };
     return { rows: [], rowCount: 0 };
@@ -135,7 +142,7 @@ test('simulacao nao grava; --aplicar grava cliques e vendas dentro de BEGIN/COMM
   assert.strictEqual(textos.filter((x) => x === 'UPDATE').length, 2);
   assert.ok(textos.indexOf('BEGIN') < textos.indexOf('UPDATE') && textos.lastIndexOf('UPDATE') < textos.indexOf('COMMIT'));
   const updVenda = ap.calls.find((c) => c.text.includes('UPDATE sales'));
-  assert.deepStrictEqual(updVenda.params, ['FB', null, C, S, A, 'T1', null]);
+  assert.deepStrictEqual(updVenda.params, ['FB', null, C, S, A, 'T1', 'ig', null, null, null, null]);
 });
 
 test('clique da venda: o mais recente COM campanha criado ate a venda, ja corrigido em memoria', async () => {
@@ -235,11 +242,57 @@ test('UPDATE compare-and-set: linha que mudou depois da leitura fica como esta',
   assert.strictEqual(db.vendas[0].campaign_id, '999999');
   assert.strictEqual(db.cliques[0].campaign_id, '888888');
   const updV = db.calls.find((c) => c.text.includes('UPDATE sales'));
-  assert.match(updV.text, /WHERE transaction_id = \$6 AND campaign_id IS NOT DISTINCT FROM \$7/);
-  assert.deepStrictEqual(updV.params.slice(5), ['T1', null]);
+  assert.match(updV.text, /WHERE transaction_id = \$6\s+AND \(utm_source, utm_campaign, campaign_id, adset_id, ad_id\) IS NOT DISTINCT FROM \(\$7, \$8, \$9, \$10, \$11\)/);
+  assert.deepStrictEqual(updV.params.slice(5), ['T1', null, null, null, null, null]);
   const updC = db.calls.find((c) => c.text.includes('UPDATE clicks'));
-  assert.match(updC.text, /WHERE ctid = \$5::tid AND sck IS NOT DISTINCT FROM \$6 AND campaign_id IS NOT DISTINCT FROM \$7/);
-  assert.deepStrictEqual(updC.params.slice(4), ['(0,1)', 'idx_9', C]);
+  assert.match(updC.text, /WHERE ctid = \$5::tid AND sck IS NOT DISTINCT FROM \$6 AND created_at = \$7::timestamptz AND campaign_id IS NOT DISTINCT FROM \$8/);
+  assert.deepStrictEqual(updC.params.slice(4), ['(0,1)', 'idx_9', t('09').toISOString(), C]);
+  // o created_at vai como o texto lido do Postgres (microssegundos), nunca como Date do JS (milissegundos)
+  assert.match(db.calls.find((c) => /FROM clicks\s+WHERE created_at >/.test(c.text)).text, /created_at::text AS created_at_lido/);
+});
+
+test('compare-and-set da venda olha as cinco colunas: so o utm_source mudou no meio, fica como esta', async () => {
+  const db = bancoFalso({ vendas: [venda({ transaction_id: 'T1', src: CASA, utm_source: 'organic' })] });
+  const exec = db.query;
+  db.connect = async () => ({ release() {}, query: async (text, params) => {
+    if (text === 'BEGIN') db.vendas[0].utm_source = 'ig';
+    return exec(text, params);
+  } });
+  const r = await reatribuir(db, { aplicar: true, log: () => {} });
+  assert.strictEqual(r.ignorados, 1);
+  assert.deepStrictEqual(cinco(db.vendas[0]), ['ig', null, null, null, null]);
+});
+
+test('--aplicar sem as tabelas de backup: recusa antes de ler ou gravar; simulacao nao exige', async () => {
+  for (const backup of [[], ['sales_reatrib_bkp'], ['clicks_reatrib_bkp']]) {
+    const db = bancoFalso({ backup, vendas: [venda({ transaction_id: 'T1', src: CASA })] });
+    await assert.rejects(reatribuir(db, { aplicar: true, log: () => {} }), /--aplicar recusado, nada foi gravado: falta o backup/);
+    assert.deepStrictEqual(db.calls.map((c) => c.text.trim().split(/\s+/)[0]), ['SELECT']);
+    assert.match(db.calls[0].text, /to_regclass\('sales_reatrib_bkp'\).*to_regclass\('clicks_reatrib_bkp'\)/s);
+  }
+  const sim = bancoFalso({ backup: [], vendas: [venda({ transaction_id: 'T1', src: CASA })] });
+  assert.strictEqual((await reatribuir(sim, { log: () => {} })).vendas, 1);
+  assert.ok(!sim.calls.some((c) => c.text.includes('to_regclass')));
+});
+
+test('relatorio conta as linhas com campanha gravada nao numerica (nao mexidas)', async () => {
+  const db = bancoFalso({
+    cliques: [{ sck: 'idx_e', created_at: t('09'), funnel_id: 1, utm_source: 'TT', campaign_id: '{campaignid}', ad_id: `${A}::x::` }],
+    vendas: [venda({ transaction_id: 'T1', utm_source: 'ig', campaign_id: 'Teste', ad_id: `${A}::x::` }), venda({ transaction_id: 'T2', src: CASA })],
+  });
+  const linhas = [];
+  const r = await reatribuir(db, { log: (l) => linhas.push(l) });
+  assert.strictEqual(r.vendas, 1);
+  assert.ok(linhas.includes('1 venda(s) e 1 clique(s) com campanha gravada nao numerica — nao mexidas'), linhas.join('\n'));
+});
+
+test('regra do automatico vem do normalize.js (sem copia local no script)', () => {
+  const fonte = require('node:fs').readFileSync(require.resolve('../scripts/reatribuir'), 'utf8');
+  assert.doesNotMatch(fonte, /const (SITES_META|NUMERICO)\b/);
+  // th esta na lista de sites do Meta; campanha crua de 5 digitos nao e o automatico (6+, como no /collect)
+  assert.deepStrictEqual(cliqueCorrigido({ utm_source: 'th', utm_medium: 'paid', utm_campaign: C, campaign_id: null }),
+    { utm_source: 'FB', campaign_id: C, adset_id: null, ad_id: null });
+  assert.strictEqual(cliqueCorrigido({ utm_source: 'ig', utm_medium: 'paid', utm_campaign: '12345', campaign_id: null }), null);
 });
 
 test('erro no meio do --aplicar: ROLLBACK e o erro sobe', async () => {

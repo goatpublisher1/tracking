@@ -10,10 +10,7 @@
 //    node scripts/reatribuir.js --aplicar  # grava, numa transacao
 //    node scripts/reatribuir.js --dias 15
 // =====================================================================
-const { normalizeUtms, semSufixo, idNumerico, FONTES_SITE_META } = require('../normalize');
-
-const SITES_META = ['fb', 'ig', 'an', 'msg', 'th'];
-const NUMERICO = /^\d{6,}$/;
+const { normalizeUtms, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico } = require('../normalize');
 
 // `src` e o que o header monta juntando, nessa ordem, os utm_* nao vazios:
 // source|medium|campaign|content|term — e cada um do modelo da casa e "nome|id".
@@ -35,10 +32,9 @@ function parseSrc(src) {
   return null; // contagem ambigua (nome com "|"?): melhor nao adivinhar
 }
 
+// Mesma regra do /collect (metaAutomatico): fb/ig/an/msg/th, medium paid, campanha crua de 6+ digitos.
 function ehAutomaticoSemId(c) {
-  return !c.campaign_id && String(c.utm_medium || '').toLowerCase() === 'paid'
-    && SITES_META.includes(String(c.utm_source || '').toLowerCase())
-    && NUMERICO.test(semSufixo(c.utm_campaign) || '');
+  return !c.campaign_id && !!metaAutomatico((k) => c[k]);
 }
 
 const COLUNAS = ['utm_source', 'utm_campaign', 'campaign_id', 'adset_id', 'ad_id'];
@@ -100,6 +96,17 @@ function vendaCorrigida(v, clique = null, mae = null) {
 }
 
 async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log } = {}) {
+  // --aplicar so com o backup do HANDOFF.md feito: sem ele nao ha como desfazer. Antes de qualquer
+  // leitura, para nao gravar nada. A simulacao nao precisa dele.
+  if (aplicar) {
+    const { rows: [b] } = await pool.query(
+      `SELECT to_regclass('sales_reatrib_bkp') AS vendas, to_regclass('clicks_reatrib_bkp') AS cliques`);
+    const faltam = [!b?.vendas && 'sales_reatrib_bkp', !b?.cliques && 'clicks_reatrib_bkp'].filter(Boolean);
+    if (faltam.length) {
+      throw new Error(`--aplicar recusado, nada foi gravado: falta o backup (${faltam.join(', ')}). `
+        + 'Rode os CREATE TABLE da secao "Reatribuir o historico" do HANDOFF.md e tente de novo.');
+    }
+  }
   const fontes = [...FONTES_SITE_META];
   // utm_url e coluna de 2026-10-14: o script pode rodar antes do ALTER. Sem ela, so o src.
   const { rows: temUtmUrl } = await pool.query(
@@ -108,9 +115,11 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
   const janela = `created_at > now() - ($1::int * interval '1 day')`;
   // Fonte de site do Meta com campanha: so a que ainda nao e 'FB' (senao entraria todo clique pago).
   const fonteMeta = `(campaign_id IS NOT NULL AND utm_source <> 'FB' AND lower(utm_source) = ANY($2::text[]))`;
-  // sck IS NOT NULL: o backup do HANDOFF desfaz clique por (sck, created_at); sem sck nao teria volta
+  // sck IS NOT NULL: o backup do HANDOFF desfaz clique por (sck, created_at); sem sck nao teria volta.
+  // created_at como texto: o Date do JS guarda milissegundos e o Postgres microssegundos; o UPDATE
+  // compara com o valor exato lido.
   const { rows: cliques } = await pool.query(
-    `SELECT ctid::text AS ctid, sck, created_at, funnel_id, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+    `SELECT ctid::text AS ctid, sck, created_at::text AS created_at_lido, funnel_id, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
             campaign_id, adset_id, ad_id
        FROM clicks
       WHERE ${janela} AND sck IS NOT NULL
@@ -201,7 +210,12 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
     }
   }
 
+  // selecionadas, mas com campaign_id gravado que nao e numero: o script nao mexe (ver vendaCorrigida)
+  const naoNumerica = (x) => !!x.campaign_id && !idNumerico(x.campaign_id);
+  const naoNumericas = { vendas: vendas.filter(naoNumerica).length, cliques: cliques.filter(naoNumerica).length };
+
   log(`${mudCliques.length} clique(s) e ${mudVendas.length} venda(s) a corrigir nos ultimos ${dias} dias${aplicar ? '' : ' (simulacao)'}`);
+  log(`${naoNumericas.vendas} venda(s) e ${naoNumericas.cliques} clique(s) com campanha gravada nao numerica — nao mexidas`);
   for (const [f, r] of porFunil) {
     log(`  funil ${f ?? '(sem funil)'}: ${r.cliques} clique(s) · ${r.vendasComCampanha} venda(s) ganham campanha (${r.pagas} paga(s), receita ${r.receitaComCampanha.toFixed(2)}) · ${r.idsLimpos} com ids limpos · ${r.fonteNormalizada} com fonte normalizada`);
   }
@@ -212,20 +226,22 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
     const cli = await pool.connect();
     try {
       await cli.query('BEGIN');
-      // Compare-and-set: so grava se a linha ainda tem o que foi lido. O webhook (ou o backfill
-      // horario, que muda o ctid do clique) pode ter mexido nela no meio: ai ela fica como esta.
+      // Compare-and-set: so grava se a linha ainda tem o que foi lido (venda: as cinco colunas; clique:
+      // ctid, sck, created_at e campaign_id). O webhook (ou o backfill horario, que muda o ctid do
+      // clique) pode ter mexido nela no meio: ai ela fica como esta.
       for (const { c, n } of mudCliques) {
         const r = await cli.query(
           `UPDATE clicks SET utm_source = $1, campaign_id = $2, adset_id = $3, ad_id = $4
-            WHERE ctid = $5::tid AND sck IS NOT DISTINCT FROM $6 AND campaign_id IS NOT DISTINCT FROM $7`,
-          [n.utm_source, n.campaign_id, n.adset_id, n.ad_id, c.ctid, c.sck ?? null, c.campaign_id ?? null]);
+            WHERE ctid = $5::tid AND sck IS NOT DISTINCT FROM $6 AND created_at = $7::timestamptz AND campaign_id IS NOT DISTINCT FROM $8`,
+          [n.utm_source, n.campaign_id, n.adset_id, n.ad_id, c.ctid, c.sck ?? null, c.created_at_lido, c.campaign_id ?? null]);
         if (!r.rowCount) ignorados++;
       }
       for (const { v, n } of mudVendas) {
         const r = await cli.query(
           `UPDATE sales SET utm_source = $1, utm_campaign = $2, campaign_id = $3, adset_id = $4, ad_id = $5
-            WHERE transaction_id = $6 AND campaign_id IS NOT DISTINCT FROM $7`,
-          [n.utm_source, n.utm_campaign, n.campaign_id, n.adset_id, n.ad_id, v.transaction_id, v.campaign_id ?? null]);
+            WHERE transaction_id = $6
+              AND (utm_source, utm_campaign, campaign_id, adset_id, ad_id) IS NOT DISTINCT FROM ($7, $8, $9, $10, $11)`,
+          [n.utm_source, n.utm_campaign, n.campaign_id, n.adset_id, n.ad_id, v.transaction_id, ...COLUNAS.map((k) => v[k] ?? null)]);
         if (!r.rowCount) ignorados++;
       }
       await cli.query('COMMIT');
@@ -237,7 +253,7 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
       cli.release();
     }
   }
-  return { cliques: mudCliques.length, vendas: mudVendas.length, porFunil, ignorados };
+  return { cliques: mudCliques.length, vendas: mudVendas.length, porFunil, ignorados, naoNumericas };
 }
 
 module.exports = { parseSrc, cliqueCorrigido, vendaCorrigida, reatribuir };
