@@ -301,8 +301,10 @@ async function processarVenda(pool, venda) {
   const statusFinal = retorno?.rows?.[0]?.status ?? venda.status;
   // Sinais greppaveis: plataforma dizendo "pago" com outro status (o Purchase depende do status
   // gravado), e upsert que manteve o status antigo (paid atrasado sobre reembolso, etc.).
-  if (paid && venda.status !== 'paid') {
-    console.warn('PAID_STATUS_DIVERGENTE', JSON.stringify({ tx: txId, origem: venda.origem, status: venda.status ?? null }));
+  // Pago com o status bruto da plataforma diferente de 'paid' ('approved', 'refunded' com
+  // status=paid...): o payt.js ja decidiu o que gravar; o log mostra quando isso acontece.
+  if (paid && venda.statusBruto && venda.statusBruto !== 'paid') {
+    console.warn('PAID_STATUS_DIVERGENTE', JSON.stringify({ tx: txId, origem: venda.origem, status: venda.statusBruto, gravado: statusFinal ?? null }));
   }
   if (statusFinal !== venda.status && venda.status !== 'test') {
     console.warn('STATUS_MANTIDO', JSON.stringify({ tx: txId, recebido: venda.status ?? null, ficou: statusFinal ?? null }));

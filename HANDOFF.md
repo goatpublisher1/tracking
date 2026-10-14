@@ -10,7 +10,7 @@
    - **b.** `node scripts/verifica-sql.js` tem que terminar em `OK`. Só manda `SELECT` e `EXPLAIN` (nada é gravado): confere as duas colunas, o upsert da venda com 28 parâmetros de exemplo e os dois backfills horários no banco de verdade. Qualquer `ERRO`/`FALHOU`: não suba.
    - **c.** Rodar e colar o resultado na conversa:
      ```bash
-     node scripts/q.js "SELECT status, count(*) FROM sales WHERE plataforma='payt' AND capi_sent IS TRUE AND status NOT IN ('paid','refunded','chargeback','canceled','expired') GROUP BY 1"
+     node scripts/q.js "SELECT status, count(*) FROM sales WHERE plataforma='payt' AND capi_sent IS TRUE AND status NOT IN ('paid','refunded','chargeback') GROUP BY 1"
      node scripts/q.js "SELECT product_code, product_name, count(*) FROM sales s WHERE upsell_from IS NOT NULL AND created_at > now()-interval '30 days' AND NOT EXISTS (SELECT 1 FROM products p WHERE p.product_code=s.product_code AND p.active) GROUP BY 1,2"
      ```
      A primeira mostra venda da PayT que foi à Meta com status gravado diferente de pago (o caso que o `payt.js` passa a gravar como `paid`). A segunda lista upsell/order bump com produto não cadastrado nos últimos 30 dias: depois do deploy eles **param de ir à Meta**; cadastre o produto (com `send_to_meta`) se algum deve ir.
@@ -73,7 +73,7 @@
    node scripts/q.js "UPDATE products SET send_to_google = COALESCE(send_to_meta, true)"
    ```
    Rollback: `ALTER TABLE products DROP COLUMN send_to_google`.
-5. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
+5. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — antes do deploy (já aplicado em produção; confira se a coluna existe).** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
    ```bash
    node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
    ```

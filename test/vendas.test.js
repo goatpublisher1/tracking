@@ -622,7 +622,7 @@ test('logs: PAID_STATUS_DIVERGENTE e STATUS_MANTIDO (venda de teste nao loga STA
   console.warn = (...a) => avisos.push(a.join(' '));
   t.after(() => { global.fetch = fetchOriginal; console.warn = avisoOriginal; });
   const pool = fakePoolComFunil({ storeRow: { src: 'fb' }, retorno: { status: 'refunded' } });
-  await processarVenda(pool, { txId: 'T42', sck: 'idx_abc', paid: true, status: 'approved', value: 10, total: 10, origem: 'payt' });
+  await processarVenda(pool, { txId: 'T42', sck: 'idx_abc', paid: true, status: 'approved', statusBruto: 'approved', value: 10, total: 10, origem: 'payt' });
   assert.ok(avisos.some(a => a.startsWith('PAID_STATUS_DIVERGENTE') && a.includes('"status":"approved"') && a.includes('"origem":"payt"')));
   assert.ok(avisos.some(a => a.startsWith('STATUS_MANTIDO') && a.includes('"recebido":"approved"') && a.includes('"ficou":"refunded"')));
   avisos.length = 0;

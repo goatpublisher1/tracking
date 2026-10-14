@@ -71,6 +71,9 @@ function normalizarPayt(payload) {
   const pagamento = p?.transaction?.payment_status;
   const status = paid && pagamento !== 'refunded' && pagamento !== 'chargeback'
     ? 'paid' : (pagamento || p?.status);
+  // O que a PayT mandou, antes da regra acima: e o que o log PAID_STATUS_DIVERGENTE compara
+  // (depois da regra, 'approved' ja virou 'paid' e o log nunca veria o caso que quer pegar).
+  const statusBruto = pagamento || p?.status;
 
   // value = comissao do PRODUTOR (busca por type, nao indice fixo)
   const producerComm = Array.isArray(p?.commission)
@@ -87,6 +90,7 @@ function normalizarPayt(payload) {
     src: digSrc(p) || null,
     utms: digUtms(p),
     status: p?.test === true ? 'test' : status,
+    statusBruto: statusBruto ?? null,
     // `test` chega no topo do payload real (visto no log de producao). Mesma regra da
     // Digistore24: teste grava status 'test', fora de receita, Google e reprocesso.
     paid: p?.test !== true && paid,

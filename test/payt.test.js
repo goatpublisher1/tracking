@@ -122,3 +122,10 @@ test('venda paga grava status paid mesmo com payment_status diferente; reembolso
   assert.strictEqual(normalizarPayt({ status: 'paid', test: true, transaction: { payment_status: 'approved' } }).status, 'test');
   assert.strictEqual(normalizarPayt({ status: 'waiting_payment', transaction: { payment_status: 'pending' } }).status, 'pending');
 });
+
+test('statusBruto guarda o que a PayT mandou antes de virar paid (para o log de divergencia)', () => {
+  const v = normalizarPayt({ ...payload, status: 'paid', transaction: { ...payload.transaction, payment_status: 'approved' } });
+  assert.strictEqual(v.status, 'paid');
+  assert.strictEqual(v.statusBruto, 'approved');
+  assert.strictEqual(normalizarPayt(payload).statusBruto, 'paid');
+});
