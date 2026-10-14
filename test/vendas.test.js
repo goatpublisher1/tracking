@@ -400,7 +400,7 @@ test('clique com campanha continua vencendo os utm_* da PayT', async () => {
     return { rows: [] };
   } };
   await processarVenda(pool, { txId: 'T10', sck: 'idx_c', paid: false, value: 0, total: 0, origem: 'payt',
-    utms: { utm_source: 'FB', utm_campaign: 'Outra|C9' } });
+    utms: { utm_source: 'FB', utm_campaign: 'Outra|999999' } });
   assert.deepStrictEqual(insertSalesArgs(calls).slice(12, 17), ['FB', 'Camp', 'C1', 'S1', 'A1']);
 });
 
