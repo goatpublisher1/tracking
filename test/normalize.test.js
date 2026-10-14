@@ -80,3 +80,37 @@ test('modelo nome|id de sempre nao muda; paid de outra plataforma nao vira FB', 
   assert.strictEqual(g.utm_source, 'google');
   assert.strictEqual(g.campaign_id, null);
 });
+
+test('deepDecode nunca lanca: % solto devolve o ultimo valor bom', () => {
+  const { deepDecode } = require('../normalize');
+  assert.strictEqual(deepDecode('Oferta 50% OFF|120257'), 'Oferta 50% OFF|120257');
+  assert.strictEqual(deepDecode('Oferta%2050%25%20OFF'), 'Oferta 50% OFF');
+});
+
+test('nome com % nao derruba os ids', () => {
+  const { normalizeUtms } = require('../normalize');
+  const u = normalizeUtms({ utm_source: 'FB', utm_campaign: 'Oferta 50% OFF|120257032762500768', utm_medium: 'Conj|120257032762540768', utm_content: 'Ad|120257032762520768' });
+  assert.deepStrictEqual([u.campaign_id, u.adset_id, u.ad_id], ['120257032762500768', '120257032762540768', '120257032762520768']);
+  assert.strictEqual(u.utm_campaign, 'Oferta 50% OFF');
+});
+
+test('placeholder por parte; id so numerico', () => {
+  const { normalizeUtms } = require('../normalize');
+  const a = normalizeUtms({ utm_source: 'FB', utm_campaign: '{{campaign.name}}|120257032762500768' });
+  assert.strictEqual(a.campaign_id, '120257032762500768');
+  assert.strictEqual(a.utm_campaign, null);
+  const b = normalizeUtms({ utm_source: 'TT', utm_campaign: 'Camp|__CAMPAIGN_ID__', utm_medium: 'yt|{adgroupid}', utm_content: 'PN | Teste' });
+  assert.deepStrictEqual([b.campaign_id, b.adset_id, b.ad_id], [null, null, null]);
+});
+
+test('site do Meta com campanha numerica vira FB; sem campanha (organico) fica como veio', () => {
+  const { normalizeUtms } = require('../normalize');
+  assert.strictEqual(normalizeUtms({ utm_source: 'ig', utm_campaign: 'Camp|120257032762500768' }).utm_source, 'FB');
+  assert.strictEqual(normalizeUtms({ utm_source: 'facebook', utm_campaign: 'Camp|120257032762500768' }).utm_source, 'FB');
+  assert.strictEqual(normalizeUtms({ utm_source: 'ig', utm_medium: 'social', utm_content: 'link_in_bio' }).utm_source, 'ig');
+});
+
+test('deepDecode: no decode abortado pelo % solto o + ainda vira espaco', () => {
+  const { deepDecode } = require('../normalize');
+  assert.strictEqual(deepDecode('Oferta+50%+OFF|120257'), 'Oferta 50% OFF|120257');
+});

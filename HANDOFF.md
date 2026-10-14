@@ -2,7 +2,49 @@
 
 ## Checklist pré-deploy (fazer NESTA ORDEM, antes de subir a branch)
 
-1. **Rodar o SQL do pixel opcional — ANTES do deploy do tracking e do dashboard.** O dashboard passa a cadastrar funil sem pixel do Meta (`pixel_id`/`capi_token` nulos); com NOT NULL o INSERT falha. Seguro para o código atual: só afrouxa a restrição, nenhuma linha muda.
+1. **Atribuição (2026-10-14) — ANTES do merge desta branch (merge = deploy do tracking).** O INSERT de toda venda passa a gravar `sales.pago_em` e `sales.utm_url`; sem as colunas, toda venda falha ao gravar (a PayT recebe 200 e não reenvia: venda perdida; a Digistore24 recebe 500 e reenvia). O boot também roda o `ALTER`, mas não dá para depender dele. Os itens 2–9 abaixo são de deploys anteriores e já estão em produção: os `ALTER … IF NOT EXISTS` podem rodar de novo sem efeito; os dois `UPDATE products …` (itens 3 e 4) **não**.
+   - **a.** O `ALTER` à mão, com limite de espera pelo lock (sem ele, o `ALTER` fica na fila atrás de uma consulta longa do dashboard e trava os INSERTs de venda que chegam depois dele). Um comando só: o `q.js` manda a string inteira, e duas instruções separadas por `;` passam juntas. A saída mostra `undefined - linhas afetadas: undefined` (o `q.js` não imprime resultado de duas instruções); quem confere é o passo b. Se der `canceling statement due to lock timeout`, rode de novo em outro momento.
+     ```bash
+     node scripts/q.js "SET lock_timeout='5s'; ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
+     ```
+   - **b.** `scripts/verifica-sql.js` tem que terminar em `OK`. **Antes do merge ele ainda não existe no container de produção**: rode de um checkout local desta branch, com o `DATABASE_URL` apontando para o Postgres de produção pelo túnel SSH (o mesmo que você abre para consultar o banco do tracking):
+     ```bash
+     git checkout feat/auditoria-atribuicao && npm ci
+     DATABASE_URL="postgresql://<usuario>:<senha>@localhost:<porta do túnel>/<banco>" node scripts/verifica-sql.js
+     ```
+     Só manda `SELECT` e `EXPLAIN` (nada é gravado): confere as duas colunas, o upsert da venda com 28 parâmetros de exemplo e os dois backfills horários no banco de verdade. Qualquer `ERRO`/`FALHOU`: não faça o merge. Depois do deploy, confira de novo de dentro do container: `node scripts/verifica-sql.js`.
+   - **c.** Rodar e colar o resultado na conversa:
+     ```bash
+     node scripts/q.js "SELECT status, count(*) FROM sales WHERE plataforma='payt' AND capi_sent IS TRUE AND status NOT IN ('paid','refunded','chargeback') GROUP BY 1"
+     node scripts/q.js "SELECT product_code, product_name, count(*) FROM sales s WHERE plataforma='payt' AND upsell_from IS NOT NULL AND created_at > now()-interval '30 days' AND NOT EXISTS (SELECT 1 FROM products p WHERE p.product_code=s.product_code AND p.active) GROUP BY 1,2"
+     ```
+     A primeira mostra venda da PayT que foi à Meta com status gravado diferente de pago (o caso `approved` que o `payt.js` passa a gravar como `paid`). A segunda lista upsell/order bump da PayT com produto não cadastrado nos últimos 30 dias: depois do deploy eles **param de ir à Meta** (só quando chegam sem `sck` próprio); cadastre o produto (com `send_to_meta`) se algum deve ir. Fica só na PayT porque na Digistore24 **toda** venda tem `upsell_from` (o `order_id`), e a principal chega com o `sck` dela: ela não muda.
+   - **d.** O que muda no primeiro boot e com a regra nova (colar também):
+     ```bash
+     node scripts/q.js "SELECT count(*) AS vendas, count(*) FILTER (WHERE s.status='paid') AS pagas, sum(s.value) FILTER (WHERE s.status='paid') AS receita FROM sales s WHERE s.funnel_id IS NULL AND EXISTS (SELECT 1 FROM products p JOIN funnels f ON f.slug = p.funnel_slug WHERE p.product_code = s.product_code AND p.active)"
+     node scripts/q.js "SELECT count(*) AS cliques FROM clicks c WHERE c.funnel_id IS NULL AND c.created_at > now() - interval '7 days' AND EXISTS (SELECT 1 FROM funnels f WHERE f.active AND f.domain IS NOT NULL AND regexp_replace(lower(f.domain), '^(track\.)?(www\.)?', '') = regexp_replace(substring(lower(c.landing_url) from '^[a-z][a-z0-9+.-]*://([^/:?#]+)'), '^(track\.)?(www\.)?', ''))"
+     node scripts/q.js "SELECT count(*) AS vendas, sum(value) AS receita FROM (SELECT value, campaign_id, trim(split_part(CASE WHEN cardinality(p) = 5 AND lower(p[2]) = 'paid' THEN p[3] WHEN cardinality(p) IN (7,8) THEN p[5] END, '::', 1)) AS da_url FROM (SELECT value, campaign_id, string_to_array(src, '|') AS p FROM sales WHERE plataforma='payt' AND status='paid' AND created_at > now() - interval '30 days' AND campaign_id IS NOT NULL) a) v WHERE da_url ~ '^[0-9]{5,}$' AND da_url <> campaign_id"
+     ```
+     A primeira conta as vendas sem funil que o backfill horário vai preencher pelo produto no primeiro boot (agora também de funil desativado). A segunda, os cliques sem funil dos últimos 7 dias que ganham funil pelo domínio da `landing_url`. A terceira estima quantas vendas pagas da PayT por mês trocam de campanha com "URL do checkout primeiro": a campanha do `src` (o que o header propagou para o checkout) é outra que a gravada. As vendas já gravadas não mudam; a conta é do que vai acontecer daqui para frente.
+   - **e.** Índices, fora do horário de pico (a busca da venda-mãe roda em todo IPN da Digistore24, e a do clique com campanha em toda venda com `sck`; sem índice, cada uma varre a tabela). Primeiro veja o que já existe:
+     ```bash
+     node scripts/q.js "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE (tablename = 'sales' AND indexdef ILIKE '%(upsell_from%') OR (tablename = 'clicks' AND indexdef ILIKE '%(sck%')"
+     ```
+     Crie só o que faltar (`CONCURRENTLY` não trava gravação, mas pesa no banco; se falhar no meio fica um índice `INVALID`: `DROP INDEX CONCURRENTLY <nome>` e crie de novo):
+     ```bash
+     node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS sales_upsell_from_idx ON sales (upsell_from)"
+     node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS clicks_sck_idx ON clicks (sck)"
+     ```
+   - **f.** Depois do deploy:
+     - Na primeira venda real, o teste de fumaça. A venda paga nova tem `tem_pago_em = true`; a da PayT com `utm_*` no checkout, `tem_utm_url = true` (Digistore24: `false`, ela não manda):
+       ```bash
+       node scripts/q.js "SELECT transaction_id, status, pago_em IS NOT NULL AS tem_pago_em, utm_url IS NOT NULL AS tem_utm_url, capi_sent FROM sales ORDER BY created_at DESC LIMIT 5"
+       ```
+     - Logs a acompanhar: `payt webhook error` e `DIGISTORE_GRAVACAO_FALHOU` (venda que não gravou), `SCHEMA_PAGO_EM` (o ALTER do boot falhou), `VENDA_MAE_FALHOU`, `VENDA_ANTES_FALHOU` e `CLIQUE_COM_CAMPANHA_FALHOU` (leitura nova falhou; a venda seguiu como antes), `UTM_DA_URL_INVALIDA` (utm_* da PayT que não deu para ler), `FUNNEL_ID_HERDADO_ERRO` e `FUNNEL_CLIQUE_HERDADO_ERRO` (backfill horário de funil falhou), `PAID_STATUS_DIVERGENTE` e `STATUS_MANTIDO` (sinais; ver a seção "Atribuição (2026-10-14)").
+     - `reprocessa-capi.js`: a primeira vez depois do deploy, **sempre com `--dry`** (`node scripts/reprocessa-capi.js --dry`). Vendas `funnel_nao_resolvido` que o backfill deu funil voltam a ser candidatas; confira a lista antes de mandar.
+     - Google: upsell agora herda o `sck` da venda-mãe, então um upsell cadastrado com `send_to_google = true` passa a ser elegível para o arquivo de conversões do Google. Deixe `send_to_google` desligado nas ofertas que não são a principal.
+   - **g.** Rollback: redeploy da imagem anterior. Ela não nomeia `pago_em` nem `utm_url` no INSERT e ignora as colunas; elas podem ficar.
+2. **Rodar o SQL do pixel opcional — ANTES do deploy do tracking e do dashboard.** O dashboard passa a cadastrar funil sem pixel do Meta (`pixel_id`/`capi_token` nulos); com NOT NULL o INSERT falha. Seguro para o código atual: só afrouxa a restrição, nenhuma linha muda.
 
    ```bash
    node scripts/q.js "ALTER TABLE funnels ALTER COLUMN pixel_id DROP NOT NULL"
@@ -20,12 +62,12 @@
    um registro sem pixel criado pelo dashboard novo, a venda continua gravada, mas cada uma gera
    `CAPI_FALHOU` (POST para `/null/events`) até o tracking novo subir.
 
-2. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O sentido inverso — subir o código antes deste SQL — é grave: o `vendas.js` roda `SELECT pr.send_to_tiktok ...` em toda venda com `productCode`, antes do `INSERT` em `sales`; o `SELECT` lança, o catch do webhook da PayT responde HTTP 200 e a PayT nunca re-tenta — 100% das vendas da PayT se perdem (sem linha em `sales`, sem backlog para o `reprocessa-capi.js`). A Digistore24 recebe 500 e re-tenta; e o `/collect` devolve 500 em todo clique (colunas `ttclid`/`ttp`). `TIKTOK_EVENTS_DESLIGADO=1` **não ajuda** neste incidente (o `SELECT` roda de qualquer forma): o único conserto é rodar o SQL imediatamente. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s; o `GRANT SELECT` ao `dashboard_ro` é explícito porque o dashboard lista os pixels com o papel só-leitura (não dependa de `ALTER DEFAULT PRIVILEGES`). Rodar nesta ordem:
+3. **Rodar o SQL do TikTok (tabela `tiktok_pixels`, colunas em `clicks`/`products`/`event_log` e GRANTs) — ANTES do deploy do tracking e do dashboard.** O `INSERT` de `/collect` passa a nomear `ttclid` e `ttp` em `clicks`, e todo `INSERT` em `event_log` passa a nomear `plataforma`; sem as colunas, todo clique de checkout e toda venda falham ao gravar. O `vendas.js` também lê `products.send_to_tiktok` e `tiktok_pixels`. Rodar antes é seguro: o código atual ignora coluna e tabela que não conhece, e `DEFAULT 'meta'` preenche o histórico de `event_log` sem backfill. O sentido inverso — subir o código antes deste SQL — é grave: o `vendas.js` roda `SELECT pr.send_to_tiktok ...` em toda venda com `productCode`, antes do `INSERT` em `sales`; o `SELECT` lança, o catch do webhook da PayT responde HTTP 200 e a PayT nunca re-tenta — 100% das vendas da PayT se perdem (sem linha em `sales`, sem backlog para o `reprocessa-capi.js`). A Digistore24 recebe 500 e re-tenta; e o `/collect` devolve 500 em todo clique (colunas `ttclid`/`ttp`). `TIKTOK_EVENTS_DESLIGADO=1` **não ajuda** neste incidente (o `SELECT` roda de qualquer forma): o único conserto é rodar o SQL imediatamente. O dashboard grava `tiktok_pixels` com o papel `dashboard_rw`, por isso os dois `GRANT`s; o `GRANT SELECT` ao `dashboard_ro` é explícito porque o dashboard lista os pixels com o papel só-leitura (não dependa de `ALTER DEFAULT PRIVILEGES`). Rodar nesta ordem:
    ```bash
    node scripts/q.js "CREATE TABLE IF NOT EXISTS tiktok_pixels (id SERIAL PRIMARY KEY, domain TEXT NOT NULL, pixel_code TEXT NOT NULL, access_token TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), UNIQUE (domain, pixel_code))"
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS ttclid TEXT, ADD COLUMN IF NOT EXISTS ttp TEXT"
    node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_tiktok BOOLEAN NOT NULL DEFAULT false"
-   # rodar UMA vez, logo após o ALTER — depois que o dashboard passar a editar a flag, não repetir
+   # já aplicado em produção — não rode de novo (rodava UMA vez, logo após o ALTER; hoje o dashboard edita a flag)
    node scripts/q.js "UPDATE products SET send_to_tiktok = COALESCE(send_to_meta, true)"
    node scripts/q.js "ALTER TABLE event_log ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'meta'"
    node scripts/q.js "GRANT SELECT, INSERT, UPDATE ON tiktok_pixels TO dashboard_rw"
@@ -40,7 +82,7 @@
    ```
    Esperado: 4 linhas, `0`, e os grants `dashboard_ro SELECT` e `dashboard_rw INSERT/SELECT/UPDATE`.
    Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart interrompe os ENVIOS à TikTok sem deploy; as colunas e a tabela podem ficar. Detalhes na seção "TikTok — eventos (pixel + Events API)", mais abaixo.
-3. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
+4. **Rodar o `ALTER TABLE` das colunas `gclid`, `gbraid` e `wbraid` em `clicks` — ANTES do deploy.** O `INSERT` de `/collect` passa a nomear as três colunas, e sem elas todo clique de checkout falha com `column "gclid" of relation "clicks" does not exist` (o catch responde 500 e o clique some, sem retry). Rodar antes é seguro: o código atual ignora coluna que não conhece. Se o deploy do tracking subir antes deste `ALTER`, só a linha de `clicks` daquele clique se perde — a linha de `store` (fbp/fbc/sck) é gravada por uma instrução separada e continua chegando, então a atribuição de Purchase da Meta não é afetada; o conserto é rodar o `ALTER`, não reverter o deploy.
    ```bash
    node scripts/q.js "ALTER TABLE clicks ADD COLUMN IF NOT EXISTS gclid TEXT, ADD COLUMN IF NOT EXISTS gbraid TEXT, ADD COLUMN IF NOT EXISTS wbraid TEXT"
    ```
@@ -53,10 +95,11 @@
    dashboard):
    ```bash
    node scripts/q.js "ALTER TABLE products ADD COLUMN IF NOT EXISTS send_to_google BOOLEAN NOT NULL DEFAULT true"
+   # já aplicado em produção — não rode de novo (sobrescreveria o send_to_google editado no dashboard)
    node scripts/q.js "UPDATE products SET send_to_google = COALESCE(send_to_meta, true)"
    ```
    Rollback: `ALTER TABLE products DROP COLUMN send_to_google`.
-4. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — ANTES de qualquer outra coisa.** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
+5. **Rodar o `ALTER TABLE` da coluna `plataforma` em `sales` — antes do deploy (já aplicado em produção; confira se a coluna existe).** Sem esta coluna, todo `INSERT` de `vendas.js` falha com `column "plataforma" of relation "sales" does not exist`. Essa exception cai no catch dos dois webhooks, que responde HTTP 200 — então PayT/Digistore24 consideram a entrega feita e nunca re-tentam. A venda some por completo: sem linha em `sales`, sem Purchase na Meta, sem backlog para o `reprocessa-capi.js` (que lê de `sales`). Isto é seguro de rodar antes do deploy: o código hoje em produção ignora colunas que não conhece, e `DEFAULT 'payt'` preenche as linhas existentes sem precisar de backfill manual. O sentido inverso — subir o código antes do `ALTER TABLE` — derruba 100% das vendas, das duas plataformas.
    ```bash
    node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS plataforma TEXT NOT NULL DEFAULT 'payt'"
    ```
@@ -65,14 +108,14 @@
    node scripts/q.js "SELECT plataforma, count(*) FROM sales GROUP BY 1"
    ```
    Esperado: uma linha, `payt`, com o total de vendas.
-5. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
-6. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
-7. **Conferir os produtos cadastrados.**
+6. **Conferir versões instaladas.** No terminal do container rodando em produção (Coolify): `npm ls --depth=0`. Se `express`/`pg` vierem diferentes de `4.22.2`/`8.23.0`, regenere o lock e commit antes de dar deploy — comando exato na seção do Task 11, mais abaixo.
+7. **Configurar a chave de integração da PayT.** O código lê `integration_key` do corpo do payload e compara com `PAYT_INTEGRATION_KEY` (`server.js`) — não há token de webhook, nem header, nem query string; isso nunca existiu no código (`README.md` está correto sobre isto). Copie o `integration_key` do painel da PayT e configure-o como `PAYT_INTEGRATION_KEY` no Coolify. Não há URL de webhook para trocar.
+8. **Conferir os produtos cadastrados.**
    ```sql
    SELECT product_code, offer_type, send_to_meta, active FROM products ORDER BY funnel_slug;
    ```
    Confirme que todo upsell está marcado corretamente — a partir do `event_id` por transação (Task 6), upsells deixam de colidir com a venda principal e passam a ser enviados à Meta individualmente, então um `send_to_meta` errado aqui agora tem efeito imediato.
-8. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
+9. **Rodar as queries (a)–(i)** já documentadas abaixo (Step 2) e gerar o `schema.sql` (Step 1).
 
 Feito isso: suba a branch com **`PAYT_AUTH_ENFORCE` e `CORS_ALLOWLIST_ENFORCE` ambos ausentes/desligados**. Os dois entram em modo shadow (só logam) até os critérios de liberação das seções Task 5 e Task 10 serem cumpridos.
 
@@ -486,7 +529,7 @@ Sem este passo, "o rolling update está ligado" é suposição, não fato verifi
 
 A janela de incompatibilidade existe, e é de mão única: rodar o `ALTER TABLE` antes do deploy é seguro (o código hoje em produção ignora coluna que não conhece, e o `DEFAULT` preenche o que já existe). Subir o deploy antes do `ALTER TABLE` derruba 100% das vendas — das duas plataformas, não só Digistore24 — porque todo `INSERT` em `sales` passa a referenciar `plataforma` e falha com `column "plataforma" of relation "sales" does not exist`; a exception cai no catch do webhook (responde 200), e a venda some sem retry e sem rastro.
 
-**Por isso o `ALTER TABLE` e sua verificação agora são o item 4 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
+**Por isso o `ALTER TABLE` e sua verificação agora são o item 5 do checklist pré-deploy, no topo deste arquivo — rode-os de lá.**
 
 ### Rollback
 
@@ -612,13 +655,68 @@ O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e
 6. **Volume:** `event_log` ganha uma linha por pixel por clique de checkout. A retenção de 90 dias sugerida na Task 8 passa a valer a pena.
 7. **Rollback:** `CAPI_IC_DESLIGADO=1` desliga o IC sem deploy (o do pixel continua), mas a mudança da variável no Coolify só vale depois de **reiniciar** o serviço; falhas aparecem como `CAPI_IC_FALHOU` nos logs. O Purchase novo não tem switch — os campos a mais são só dados que a Meta aceita ou ignora.
 
+## Reatribuir o histórico (2026-10-14)
+
+Corrige cliques e vendas gravados antes das regras novas: parâmetros automáticos do Meta, `::fbclid::` colado no id, id que não é número, `utm_source` de site do Meta (`fb`, `ig`, `an`, `msg`, `th`, `facebook`, `instagram`) com campanha virando `FB`. Venda sem campanha segue a ordem do webhook: URL do checkout com campanha (`utm_url`; o `src` quando a coluna ainda não existe ou o JSON veio cortado) → último clique do `sck` com campanha criado até a venda → venda-mãe com campanha → nada. Venda que já tem campanha só ganha ids limpos e a fonte normalizada (a campanha nunca é trocada). Linha com `campaign_id` gravado que não é número (`{campaignid}`) fica como está. Só mexe em `utm_source`, `utm_campaign` (vendas) e nos ids; nunca em status, valor ou CAPI.
+
+Rodar **depois do deploy do tracking** (antes, o código antigo continua gravando do jeito velho), nesta ordem:
+
+1. **Índice em `clicks(sck)`, antes da primeira simulação.** O script busca todos os cliques dos `sck` das vendas; sem índice, cada busca varre a tabela inteira:
+   ```bash
+   node scripts/q.js "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'clicks' AND indexdef ILIKE '%(sck%'"
+   ```
+   Se não vier nenhuma linha, crie o índice fora do horário de pico (`CONCURRENTLY` não trava o `/collect`, mas pesa no banco) e só depois siga. Se o comando falhar no meio, fica um índice `INVALID`: `DROP INDEX CONCURRENTLY clicks_sck_idx` e crie de novo.
+   ```bash
+   node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS clicks_sck_idx ON clicks (sck)"
+   ```
+2. Simulação, não grava nada: `node scripts/reatribuir.js`. Mostra por funil quantos cliques mudam, quantas vendas ganham campanha (quantas pagas e a receita **só das pagas**), quantas têm ids limpos, quantas têm a fonte normalizada, e 10 exemplos. A linha "venda(s) e clique(s) com campanha gravada não numérica — não mexidas" conta as linhas que o script deixa como estão (`{campaignid}`, `Teste`); limpá-las é outra decisão.
+3. **Backup, antes do `--aplicar`:**
+   ```bash
+   node scripts/q.js "CREATE TABLE IF NOT EXISTS sales_reatrib_bkp AS SELECT transaction_id, utm_source, utm_campaign, campaign_id, adset_id, ad_id, now() AS copiado_em FROM sales WHERE created_at > now() - interval '91 days'"
+   node scripts/q.js "CREATE TABLE IF NOT EXISTS clicks_reatrib_bkp AS SELECT sck, created_at, utm_source, campaign_id, adset_id, ad_id, now() AS copiado_em FROM clicks WHERE created_at > now() - interval '91 days'"
+   node scripts/q.js "SELECT 'sales_reatrib_bkp' AS tabela, count(*) AS linhas, min(copiado_em) AS copiado_em FROM sales_reatrib_bkp UNION ALL SELECT 'clicks_reatrib_bkp', count(*), min(copiado_em) FROM clicks_reatrib_bkp"
+   ```
+   O `copiado_em` das **duas** tabelas tem de ser de agora. Com `IF NOT EXISTS`, uma tabela que já existia fica com a cópia antiga. Se essa cópia é de uma rodada anterior que não vai mais ser desfeita, **apague as duas e crie de novo antes do `--aplicar`**; senão um "desfazer" depois voltaria semanas de gravações do webhook. Se a cópia antiga ainda pode servir para desfazer a rodada anterior, decida isso antes de apagar.
+   ```bash
+   node scripts/q.js "DROP TABLE IF EXISTS sales_reatrib_bkp, clicks_reatrib_bkp"
+   ```
+   Depois, rode de novo os dois `CREATE TABLE` e a conferência acima.
+4. `node scripts/reatribuir.js --aplicar`. Se faltar uma das duas tabelas de backup, ele recusa (`ERRO: --aplicar recusado…`, código de saída 1, nada gravado); a idade da cópia não é conferida, é o passo 3. Grava numa transação (erro no meio: `ROLLBACK`, nada fica). Cada `UPDATE` só vale se a linha ainda tem o que foi lido: na venda, as cinco colunas de atribuição; no clique, `ctid`, `sck`, `created_at` e `campaign_id`. O que o webhook ou o backfill horário mexeu no meio fica como está e aparece como "linha(s) mudaram depois da leitura". Nesse caso, rode o `--aplicar` de novo.
+5. Simulação de novo: tem de dar `0 clique(s) e 0 venda(s)`.
+
+**Desfazer** (volta as colunas da cópia; também desfaz o que o webhook gravou nessas linhas depois do backup, então desfaça logo):
+```bash
+node scripts/q.js "UPDATE sales s SET utm_source = b.utm_source, utm_campaign = b.utm_campaign, campaign_id = b.campaign_id, adset_id = b.adset_id, ad_id = b.ad_id FROM sales_reatrib_bkp b WHERE b.transaction_id = s.transaction_id AND (s.utm_source, s.utm_campaign, s.campaign_id, s.adset_id, s.ad_id) IS DISTINCT FROM (b.utm_source, b.utm_campaign, b.campaign_id, b.adset_id, b.ad_id)"
+node scripts/q.js "UPDATE clicks c SET utm_source = b.utm_source, campaign_id = b.campaign_id, adset_id = b.adset_id, ad_id = b.ad_id FROM clicks_reatrib_bkp b WHERE b.sck = c.sck AND b.created_at = c.created_at AND (c.utm_source, c.campaign_id, c.adset_id, c.ad_id) IS DISTINCT FROM (b.utm_source, b.campaign_id, b.adset_id, b.ad_id)"
+```
+
+Quando a cópia não for mais necessária: `node scripts/q.js "DROP TABLE sales_reatrib_bkp, clicks_reatrib_bkp"`.
+
+Padrão: 30 dias (`--dias N`, até 90; o backup cobre 91). Rodar de novo é seguro: o que já está certo não entra.
+
+## Atribuição (2026-10-14)
+
+**Ordem da atribuição de uma venda** (`vendas.js`): (1) `utm_*` da URL do próprio checkout com campanha (só a PayT manda); (2) último clique do `sck` com campanha, até a hora da venda (num reenvio, a hora gravada da venda); (3) venda-mãe com campanha (upsell/order bump: na PayT a mãe é `transaction_id = upsell_from`, na Digistore24 é a mesma `order_id`); (4) último clique até a venda; (5) `utm_*` da URL sem campanha. "Com campanha" quer dizer id numérico em todo lugar (`^\d{5,}$`): `Teste` e `{campaignid}` gravados antes não contam, e os três ids saem gravados limpos (não numérico vira nulo). O clique da atribuição é sempre o da busca limitada à hora da venda, nunca o mais recente só por ter campanha. Upsell sem `sck` herda o `sck` da mãe (e o funil dela, se o store não resolver). As cinco colunas da campanha andam juntas no upsert: venda sem campanha ganha as cinco de uma vez, e venda com campanha A nunca recebe conjunto/anúncio de outra; campanha gravada não numérica conta como ausente. Upsell/order bump com produto **não cadastrado** (achou a mãe e chegou sem `sck` próprio) não vai à Meta nem à TikTok (marca `produto_nao_envia_meta`): o "não cadastrado = envia" vale só para a venda principal.
+
+**Status só anda para frente:** posto 0 = qualquer não pago, 1 = `paid`, 2 = `refunded`/`chargeback`; no mesmo posto vale o mais novo. `test` nunca sobrescreve status real. **Purchase** (CAPI) só na transição para `paid`, ou com `paid` gravado e `capi_sent` não verdadeiro: `status_refunded` etc. quando o banco ficou com outro status; `ja_enviada` sempre que `capi_sent` já é verdadeiro. **CompletePayment** (TikTok) só na transição (e nunca com `capi_sent` verdadeiro). Venda paga da PayT grava `paid` quando o `transaction.payment_status` é `paid`, `approved`, vazio ou não vem; qualquer outro (`canceled`, `refused`, `expired`, `refunded`, `chargeback`…) é gravado como veio, e o gate não manda nada. Logs: `PAID_STATUS_DIVERGENTE` (plataforma disse pago com outro status) e `STATUS_MANTIDO` (o upsert manteve o status antigo).
+
+**Colunas novas em `sales`**, criadas no boot do `server.js` (`ADD COLUMN IF NOT EXISTS`, como `refunded_at`): `pago_em` (hora do servidor na primeira vez que a venda fica `paid`; vendas pagas antes do deploy ficam nulas) e `utm_url` (JSON dos `utm_*` que o checkout recebeu). O INSERT da venda grava as duas: rode o `ALTER` e o `scripts/verifica-sql.js` **antes** do deploy (item 1 do checklist pré-deploy, no topo). **`SCHEMA_PAGO_EM` no log quer dizer que nenhuma venda está gravando** — rode o `ALTER` à mão na hora:
+
+```bash
+node scripts/q.js "SET lock_timeout='5s'; ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
+```
+
+Produto cadastrado em funil desativado continua valendo (tipo da oferta, `send_to_meta`, `send_to_tiktok`; o ativo vem primeiro, depois o menor `id`). O backfill horário também dá funil a clique sem funil dos últimos 7 dias, pelo domínio da `landing_url` (`FUNNEL_CLIQUE_HERDADO`).
+
+**Deploy: tracking antes do dashboard** (o dashboard passa a ler `pago_em`).
+
 ## Funil sem pixel do Meta
 
 Um registro de `funnels` "tem pixel" quando `pixel_id` e `capi_token` estão preenchidos (`temPixel` em `capi.js`). Registro ativo sem pixel grava clique (`/collect`) e venda normalmente, resolve funil por domínio/slug/sck/produto como sempre, e **não** fala com a CAPI: `vendas.js` marca `{"skipped":"sem_pixel"}` e loga `CAPI_SEM_PIXEL`; `ic.js` não manda IC nem grava `event_log`; `reprocessa-capi.js` pula com `sem pixel no dominio`. Quando o pixel é cadastrado depois (dashboard, aba Meta Ads do cartão), a CAPI vale dali em diante — nada do passado é reenviado.
 
 ## TikTok — eventos (pixel + Events API)
 
-O tracking manda dois eventos à Events API da TikTok: `InitiateCheckout` (disparado pelo `/collect`, em `ic.js`) e `CompletePayment` (disparado pelos webhooks de venda, em `vendas.js`, só para produtos com `products.send_to_tiktok = true`). O pixel é resolvido pelo domínio do funil em `tiktok_pixels`. O SQL é o item 2 do checklist pré-deploy, no topo deste arquivo.
+O tracking manda dois eventos à Events API da TikTok: `InitiateCheckout` (disparado pelo `/collect`, em `ic.js`) e `CompletePayment` (disparado pelos webhooks de venda, em `vendas.js`, só para produtos com `products.send_to_tiktok = true`). O pixel é resolvido pelo domínio do funil em `tiktok_pixels`. O SQL é o item 3 do checklist pré-deploy, no topo deste arquivo.
 
 **Variáveis (serviço de tracking no Coolify, com *Available at Runtime* marcado):**
 - `TIKTOK_TEST_EVENT_CODE` (opcional): código da aba *Test Events* do Events Manager; com ele definido, todo evento sai com `test_event_code`. **Afeta TODOS os pixels TikTok, de todos os funis.** Os eventos de teste ficam registrados no `event_log` como aceitos (status 200) e não contam para a otimização, e nada reenvia vendas da TikTok — então as vendas daquela janela se perdem para a otimização. Em produção fica **vazio**; use por minutos e apague logo depois, com restart.

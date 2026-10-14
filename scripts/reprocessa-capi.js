@@ -18,19 +18,24 @@ async function main() {
   //      normal decidiu nao mandar; reenviar aqui contrariaria essa decisao;
   //  (b) chegou a alguma pixel mas nao a todas (multi-conta): capi_sent=true com algum
   //      status diferente de 200 em capi_response. So as pixels que faltam recebem.
-  // Exclui tambem produto com send_to_meta=false, como o webhook (nao cadastrado = envia).
+  // Marcas de pulo em capi_response (vendas.js): modo_teste, produto_nao_envia_meta e sem_pixel
+  // continuam fora. funnel_nao_resolvido volta quando a venda ja tem funnel_id: o backfill
+  // horario do server.js preenche o funil depois, e o pulo foi so falta de funil na hora.
+  // Exclui tambem produto com send_to_meta=false, como o webhook (nao cadastrado = envia) — sem
+  // exigir funil ativo, como vendas.js: o produto continua valendo depois da troca de dominio.
   const { rows: vendas } = await pool.query(`
     SELECT s.* FROM sales s
     WHERE s.status='paid' AND s.funnel_id IS NOT NULL
       AND s.created_at > now() - interval '6 days'
       AND (
-        (s.capi_sent IS NOT TRUE AND (s.capi_response IS NULL OR s.capi_response::text NOT LIKE '{"skipped"%'))
+        (s.capi_sent IS NOT TRUE AND (s.capi_response IS NULL OR s.capi_response::text NOT LIKE '{"skipped"%'
+          OR s.capi_response::text LIKE '%"funnel_nao_resolvido"%'))
         OR (s.capi_sent IS TRUE AND s.capi_response::text ~ '"status":(?!200[,}])')
       )
       AND NOT EXISTS (
         SELECT 1 FROM products pr
         JOIN funnels f ON f.slug = pr.funnel_slug
-        WHERE pr.product_code = s.product_code AND pr.active AND f.active
+        WHERE pr.product_code = s.product_code AND pr.active
           AND pr.send_to_meta = false
       )
     ORDER BY s.created_at`);

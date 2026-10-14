@@ -12,17 +12,21 @@ function deepDecode(value) {
   if (!value) return value;
   let out = String(value);
   for (let i = 0; i < 3; i++) {
-    const dec = decodeURIComponent(out.replace(/\+/g, ' '));
+    // "%" solto em nome de anuncio ("Oferta 50% OFF") fazia decodeURIComponent lancar: o /collect
+    // devolvia 500 e as UTMs da venda se perdiam. Nunca lanca: no erro, fica o ultimo valor bom.
+    let dec;
+    // O + como espaco vale mesmo quando o decode aborta ("Oferta+50%+OFF" -> "Oferta 50% OFF").
+    try { dec = decodeURIComponent(out.replace(/\+/g, ' ')); } catch (e) { out = out.replace(/\+/g, ' '); break; }
     if (dec === out) break;
     out = dec;
   }
   return out.trim();
 }
 
-// remove placeholders de macro não resolvidos ({{...}} ou {campaign.id})
+// remove placeholders de macro não resolvidos ({{...}}, {campaign.id} ou __CAMPAIGN_ID__ do TikTok)
 function stripPlaceholder(value) {
   if (!value) return null;
-  if (/\{\{.*\}\}/.test(value) || /^\{.*\}$/.test(value)) return null;
+  if (/\{\{.*\}\}/.test(value) || /^\{.*\}$/.test(value) || /^__[A-Z0-9_]+__$/.test(value)) return null;
   return value;
 }
 
@@ -32,14 +36,22 @@ function semSufixo(id) {
   return id ? (id.replace(/::.*$/, '').trim() || null) : null;
 }
 
-// separa "Nome da Campanha|120xxxxx" em { name, id }
+// Id de campanha/conjunto/anuncio so vale se for numerico (5+ digitos). Qualquer outra coisa depois
+// do "|" ("Teste", "{adgroupid}", "C9") e lixo de macro e nao pode virar id gravado.
+function idNumerico(v) {
+  const x = stripPlaceholder(semSufixo(v));
+  return /^\d{5,}$/.test(x || '') ? x : null;
+}
+
+// separa "Nome da Campanha|120xxxxx" em { name, id }. O placeholder sai por parte: com
+// "{{campaign.name}}|120xxx" o nome some mas o id, que e valido, fica.
 function splitNameId(value) {
   if (!value) return { name: null, id: null };
   const idx = value.lastIndexOf('|');
-  if (idx === -1) return { name: value, id: null };
+  if (idx === -1) return { name: stripPlaceholder(value), id: null };
   return {
-    name: value.slice(0, idx).trim() || null,
-    id: semSufixo(value.slice(idx + 1)),
+    name: stripPlaceholder(value.slice(0, idx).trim() || null),
+    id: idNumerico(value.slice(idx + 1)),
   };
 }
 
@@ -48,6 +60,9 @@ function splitNameId(value) {
 // utm_content). Campanha criada sem o nosso modelo "nome|id" chega assim; antes o clique
 // ficava sem id nenhum e com utm_source "ig"/"fb", que nenhuma fonte reconhece.
 const SITES_META = new Set(['fb', 'ig', 'an', 'msg', 'th']);
+// Fontes que o Meta/usuario escreve no utm_source do modelo "nome|id" (inclui os nomes por extenso).
+// Separado de SITES_META de proposito: o caminho automatico acima nao muda.
+const FONTES_SITE_META = new Set([...SITES_META, 'facebook', 'instagram']);
 function metaAutomatico(g) {
   const fonte = (g('utm_source') || '').toLowerCase();
   const meio = (g('utm_medium') || '').toLowerCase();
@@ -72,7 +87,8 @@ function cleanSource(value) {
 
 // entrada: objeto de query params cru; saída: campos normalizados
 function normalizeUtms(raw = {}) {
-  const g = (k) => stripPlaceholder(deepDecode(raw[k]));
+  // sem stripPlaceholder aqui: o placeholder sai por parte (nome e id) em splitNameId
+  const g = (k) => deepDecode(raw[k]);
 
   const auto = metaAutomatico(g);
   if (auto) return auto;
@@ -81,17 +97,22 @@ function normalizeUtms(raw = {}) {
   const content = splitNameId(g('utm_content'));   // costuma trazer ad|id
   const medium = splitNameId(g('utm_medium'));     // costuma trazer adset|id
 
-  return {
-    utm_source:   cleanSource(g('utm_source')),
+  const term = stripPlaceholder(g('utm_term'));   // placement: Facebook_Reels etc
+  const out = {
+    utm_source:   cleanSource(stripPlaceholder(g('utm_source'))),
     utm_medium:   medium.name,
     utm_campaign: campaign.name,
     utm_content:  content.name,
-    utm_term:     g('utm_term'),        // placement: Facebook_Reels etc
+    utm_term:     term,
     campaign_id:  campaign.id,
     adset_id:     medium.id,
     ad_id:        content.id,
-    placement:    g('utm_term'),
+    placement:    term,
   };
+  // Clique de anuncio do Meta que veio com "ig"/"facebook" no utm_source nao casa com nenhuma fonte
+  // do dashboard. Com campanha numerica e anuncio pago: vira FB. Sem campanha (organico) fica como veio.
+  if (out.campaign_id && FONTES_SITE_META.has((out.utm_source || '').toLowerCase())) out.utm_source = 'FB';
+  return out;
 }
 
 // Identificadores de clique do Google Ads. gclid vem no desktop/Android; gbraid e
@@ -115,4 +136,4 @@ function ttpDe(b) {
   return v ? v.slice(0, 200) : null;
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe };
+module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico };

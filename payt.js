@@ -64,7 +64,17 @@ function normalizarPayt(payload) {
   const paid = p?.transaction?.payment_status === 'paid' || p?.status === 'paid';
   // sem || null no final: a posicao 5 do INSERT original nao tinha esse
   // fallback, e string vazia/0/false em p.status precisa sobreviver intacto.
-  const status = p?.transaction?.payment_status || p?.status;
+  // Venda paga grava 'paid' quando o payment_status tambem diz pago ('paid', 'approved') ou nao
+  // vem: o Purchase depende do status GRAVADO (vendas.js), e o primeiro Purchase nao pode ficar
+  // preso num 'approved'. Qualquer outro payment_status (canceled, refused, expired, refunded,
+  // chargeback...) e gravado como veio — virar 'paid' esconderia o cancelamento/reembolso — e o
+  // gate do vendas.js nao manda nada.
+  const pagamento = p?.transaction?.payment_status;
+  const status = paid && (!pagamento || pagamento === 'paid' || pagamento === 'approved')
+    ? 'paid' : (pagamento || p?.status);
+  // O que a PayT mandou, antes da regra acima: e o que o log PAID_STATUS_DIVERGENTE compara
+  // (depois da regra, 'approved' ja virou 'paid' e o log nunca veria o caso que quer pegar).
+  const statusBruto = pagamento || p?.status;
 
   // value = comissao do PRODUTOR (busca por type, nao indice fixo)
   const producerComm = Array.isArray(p?.commission)
@@ -81,6 +91,7 @@ function normalizarPayt(payload) {
     src: digSrc(p) || null,
     utms: digUtms(p),
     status: p?.test === true ? 'test' : status,
+    statusBruto: statusBruto ?? null,
     // `test` chega no topo do payload real (visto no log de producao). Mesma regra da
     // Digistore24: teste grava status 'test', fora de receita, Google e reprocesso.
     paid: p?.test !== true && paid,

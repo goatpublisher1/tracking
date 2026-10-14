@@ -111,3 +111,32 @@ test('utms: le os utm_* que a PayT recebeu na URL do checkout; sem eles, null', 
   assert.deepStrictEqual(v.utms, { utm_source: 'FB', utm_campaign: 'Camp|111', utm_medium: 'Conj|222', utm_content: 'Ad|333', utm_term: 'Instagram_Reels' });
   assert.strictEqual(normalizarPayt(payload).utms, null);
 });
+
+// ---- auditoria 2026-10-14: o Purchase depende do status gravado
+test('venda paga grava status paid mesmo com payment_status diferente; reembolso continua vencendo', () => {
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'approved' } }).status, 'paid');
+  assert.strictEqual(normalizarPayt({ transaction: { payment_status: 'paid' }, status: 'pending' }).status, 'paid');
+  // virar 'paid' esconderia o reembolso: o terminal do payment_status fica, como hoje
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'refunded' } }).status, 'refunded');
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'chargeback' } }).status, 'chargeback');
+  assert.strictEqual(normalizarPayt({ status: 'paid', test: true, transaction: { payment_status: 'approved' } }).status, 'test');
+  assert.strictEqual(normalizarPayt({ status: 'waiting_payment', transaction: { payment_status: 'pending' } }).status, 'pending');
+});
+
+test('statusBruto guarda o que a PayT mandou antes de virar paid (para o log de divergencia)', () => {
+  const v = normalizarPayt({ ...payload, status: 'paid', transaction: { ...payload.transaction, payment_status: 'approved' } });
+  assert.strictEqual(v.status, 'paid');
+  assert.strictEqual(v.statusBruto, 'approved');
+  assert.strictEqual(normalizarPayt(payload).statusBruto, 'paid');
+});
+
+test('paid so vence quando o payment_status tambem diz pago (paid/approved) ou nao vem; o resto fica como veio', () => {
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: 'approved' } }).status, 'paid');
+  assert.strictEqual(normalizarPayt({ status: 'paid', transaction: { payment_status: '' } }).status, 'paid');
+  assert.strictEqual(normalizarPayt({ status: 'paid' }).status, 'paid');
+  for (const outro of ['canceled', 'refused', 'expired', 'refunded', 'chargeback', 'waiting_payment']) {
+    const v = normalizarPayt({ status: 'paid', transaction: { payment_status: outro } });
+    assert.strictEqual(v.status, outro, outro);
+    assert.strictEqual(v.paid, true, 'paid continua o OR de sempre; quem barra o envio e o gate do vendas.js');
+  }
+});
