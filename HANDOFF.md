@@ -26,9 +26,14 @@
      node scripts/q.js "SELECT count(*) AS vendas, sum(value) AS receita FROM (SELECT value, campaign_id, trim(split_part(CASE WHEN cardinality(p) = 5 AND lower(p[2]) = 'paid' THEN p[3] WHEN cardinality(p) IN (7,8) THEN p[5] END, '::', 1)) AS da_url FROM (SELECT value, campaign_id, string_to_array(src, '|') AS p FROM sales WHERE plataforma='payt' AND status='paid' AND created_at > now() - interval '30 days' AND campaign_id IS NOT NULL) a) v WHERE da_url ~ '^[0-9]{5,}$' AND da_url <> campaign_id"
      ```
      A primeira conta as vendas sem funil que o backfill horário vai preencher pelo produto no primeiro boot (agora também de funil desativado). A segunda, os cliques sem funil dos últimos 7 dias que ganham funil pelo domínio da `landing_url`. A terceira estima quantas vendas pagas da PayT por mês trocam de campanha com "URL do checkout primeiro": a campanha do `src` (o que o header propagou para o checkout) é outra que a gravada. As vendas já gravadas não mudam; a conta é do que vai acontecer daqui para frente.
-   - **e.** Opcional, fora do horário de pico (a busca da venda-mãe roda em todo IPN da Digistore24):
+   - **e.** Índices, fora do horário de pico (a busca da venda-mãe roda em todo IPN da Digistore24, e a do clique com campanha em toda venda com `sck`; sem índice, cada uma varre a tabela). Primeiro veja o que já existe:
+     ```bash
+     node scripts/q.js "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE (tablename = 'sales' AND indexdef ILIKE '%(upsell_from%') OR (tablename = 'clicks' AND indexdef ILIKE '%(sck%')"
+     ```
+     Crie só o que faltar (`CONCURRENTLY` não trava gravação, mas pesa no banco; se falhar no meio fica um índice `INVALID`: `DROP INDEX CONCURRENTLY <nome>` e crie de novo):
      ```bash
      node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS sales_upsell_from_idx ON sales (upsell_from)"
+     node scripts/q.js "CREATE INDEX CONCURRENTLY IF NOT EXISTS clicks_sck_idx ON clicks (sck)"
      ```
    - **f.** Depois do deploy:
      - Na primeira venda real, o teste de fumaça. A venda paga nova tem `tem_pago_em = true`; a da PayT com `utm_*` no checkout, `tem_utm_url = true` (Digistore24: `false`, ela não manda):
@@ -698,7 +703,7 @@ Padrão: 30 dias (`--dias N`, até 90; o backup cobre 91). Rodar de novo é segu
 **Colunas novas em `sales`**, criadas no boot do `server.js` (`ADD COLUMN IF NOT EXISTS`, como `refunded_at`): `pago_em` (hora do servidor na primeira vez que a venda fica `paid`; vendas pagas antes do deploy ficam nulas) e `utm_url` (JSON dos `utm_*` que o checkout recebeu). O INSERT da venda grava as duas: rode o `ALTER` e o `scripts/verifica-sql.js` **antes** do deploy (item 1 do checklist pré-deploy, no topo). **`SCHEMA_PAGO_EM` no log quer dizer que nenhuma venda está gravando** — rode o `ALTER` à mão na hora:
 
 ```bash
-node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
+node scripts/q.js "SET lock_timeout='5s'; ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"
 ```
 
 Produto cadastrado em funil desativado continua valendo (tipo da oferta, `send_to_meta`, `send_to_tiktok`; o ativo vem primeiro, depois o menor `id`). O backfill horário também dá funil a clique sem funil dos últimos 7 dias, pelo domínio da `landing_url` (`FUNNEL_CLIQUE_HERDADO`).

@@ -3,7 +3,9 @@
 //  as colunas pago_em/utm_url existem em sales, e o upsert da venda e os dois backfills
 //  horarios passam pelo parser e pelo planner. So SELECT e EXPLAIN (sem ANALYZE): nada e
 //  executado nem gravado. Coluna faltando ou SQL quebrado no upsert = toda venda perdida.
-//  Uso (de dentro do container, como scripts/q.js): node scripts/verifica-sql.js
+//  Uso: antes do merge, de um checkout local desta branch com DATABASE_URL pelo tunel SSH
+//  (o container ainda nao tem este arquivo); depois do deploy, de dentro do container, como
+//  scripts/q.js: node scripts/verifica-sql.js
 // =====================================================================
 const { SQL_UPSERT_VENDA, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE } = require('../vendas');
 
@@ -26,12 +28,12 @@ async function verificaSql(pool, log = console.log) {
   if (faltam.length) {
     ok = false;
     log(`FALTA em sales: ${faltam.join(', ')} — rode o ALTER antes do deploy:`);
-    log('  node scripts/q.js "ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"');
+    log('  node scripts/q.js "SET lock_timeout=\'5s\'; ALTER TABLE sales ADD COLUMN IF NOT EXISTS pago_em TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS utm_url TEXT"');
   }
   for (const [nome, sql, params] of [
     ['upsert da venda (vendas.js)', SQL_UPSERT_VENDA, PARAMS_EXEMPLO],
-    ['backfill de funil da venda (server.js)', SQL_HERDA_FUNIL_VENDA, []],
-    ['backfill de funil do clique (server.js)', SQL_HERDA_FUNIL_CLIQUE, []],
+    ['backfill horario de funil da venda', SQL_HERDA_FUNIL_VENDA, []],
+    ['backfill horario de funil do clique', SQL_HERDA_FUNIL_CLIQUE, []],
   ]) {
     try {
       await pool.query('EXPLAIN ' + sql, params);
