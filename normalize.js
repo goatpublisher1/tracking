@@ -26,6 +26,12 @@ function stripPlaceholder(value) {
   return value;
 }
 
+// Algumas contas mandam o fbclid colado no fim do id ("120xxx::PAZ...::"). Sem cortar,
+// o ad_id gravado nunca casa com o id do gerenciador e a venda some da linha do anuncio.
+function semSufixo(id) {
+  return id ? (id.replace(/::.*$/, '').trim() || null) : null;
+}
+
 // separa "Nome da Campanha|120xxxxx" em { name, id }
 function splitNameId(value) {
   if (!value) return { name: null, id: null };
@@ -33,7 +39,24 @@ function splitNameId(value) {
   if (idx === -1) return { name: value, id: null };
   return {
     name: value.slice(0, idx).trim() || null,
-    id: value.slice(idx + 1).trim() || null,
+    id: semSufixo(value.slice(idx + 1)),
+  };
+}
+
+// Parametros automaticos do Meta: utm_source={{site_source_name}} (fb, ig, an, msg, th),
+// utm_medium=paid e os ids crus (campanha em utm_campaign, conjunto em utm_term, anuncio em
+// utm_content). Campanha criada sem o nosso modelo "nome|id" chega assim; antes o clique
+// ficava sem id nenhum e com utm_source "ig"/"fb", que nenhuma fonte reconhece.
+const SITES_META = new Set(['fb', 'ig', 'an', 'msg', 'th']);
+function metaAutomatico(g) {
+  const fonte = (g('utm_source') || '').toLowerCase();
+  const meio = (g('utm_medium') || '').toLowerCase();
+  const campanha = semSufixo(g('utm_campaign'));
+  if (meio !== 'paid' || !SITES_META.has(fonte) || !/^\d{6,}$/.test(campanha || '')) return null;
+  const digitos = (v) => { const x = semSufixo(v); return /^\d{6,}$/.test(x || '') ? x : null; };
+  return {
+    utm_source: 'FB', utm_medium: 'paid', utm_campaign: null, utm_content: null, utm_term: null,
+    campaign_id: campanha, adset_id: digitos(g('utm_term')), ad_id: digitos(g('utm_content')), placement: null,
   };
 }
 
@@ -50,6 +73,9 @@ function cleanSource(value) {
 // entrada: objeto de query params cru; saída: campos normalizados
 function normalizeUtms(raw = {}) {
   const g = (k) => stripPlaceholder(deepDecode(raw[k]));
+
+  const auto = metaAutomatico(g);
+  if (auto) return auto;
 
   const campaign = splitNameId(g('utm_campaign'));
   const content = splitNameId(g('utm_content'));   // costuma trazer ad|id

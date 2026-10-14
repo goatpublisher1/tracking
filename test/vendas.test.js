@@ -381,3 +381,37 @@ test('dominio ativo sem pixel: grava a venda, nao chama a Meta, marca sem_pixel 
   assert.strictEqual(upd.params[0], '{"skipped":"sem_pixel"}');
   assert.ok(erros.some(e => e.includes('CAPI_SEM_PIXEL')));
 });
+
+test('sem clique pelo sck, a venda usa os utm_* que a PayT recebeu para atribuir a campanha', async () => {
+  const pool = fakePool();
+  const venda = { txId: 'T9', sck: 'idx_sem_clique', src: null, paid: false, value: 0, total: 0, origem: 'payt',
+    utms: { utm_source: 'ig', utm_medium: 'paid', utm_campaign: '120257057544780768', utm_term: '120257057544760768', utm_content: '120257057578940768::x::' } };
+  await processarVenda(pool, venda);
+  const a = insertSalesArgs(pool.calls);
+  assert.deepStrictEqual(a.slice(12, 17), ['FB', null, '120257057544780768', '120257057544760768', '120257057578940768']);
+});
+
+test('clique com campanha continua vencendo os utm_* da PayT', async () => {
+  const calls = [];
+  const clique = { sck: 'idx_c', utm_source: 'FB', utm_campaign: 'Camp', campaign_id: 'C1', adset_id: 'S1', ad_id: 'A1' };
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    if (text.includes('FROM clicks WHERE sck=$1')) return { rows: [clique] };
+    return { rows: [] };
+  } };
+  await processarVenda(pool, { txId: 'T10', sck: 'idx_c', paid: false, value: 0, total: 0, origem: 'payt',
+    utms: { utm_source: 'FB', utm_campaign: 'Outra|C9' } });
+  assert.deepStrictEqual(insertSalesArgs(calls).slice(12, 17), ['FB', 'Camp', 'C1', 'S1', 'A1']);
+});
+
+test('utm_* malformado da PayT (% solto) nunca impede a venda de ser gravada', async () => {
+  const pool = fakePool();
+  const avisoOriginal = console.warn; console.warn = () => {};
+  try {
+    await processarVenda(pool, { txId: 'T11', sck: null, paid: false, value: 0, total: 0, origem: 'payt',
+      utms: { utm_source: 'FB', utm_campaign: '50% off|%E0%A4%A' } });
+  } finally { console.warn = avisoOriginal; }
+  const a = insertSalesArgs(pool.calls);
+  assert.ok(a, 'INSERT INTO sales aconteceu');
+  assert.ok(a[14] == null, "sem campanha");
+});

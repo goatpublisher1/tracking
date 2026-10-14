@@ -35,6 +35,26 @@ function digSrc(o) {
   return null;
 }
 
+// utm_* que o checkout recebeu na URL (o header propaga as da pagina para o link). Mesmos
+// lugares onde o sck aparece; o primeiro objeto com algum utm vence. Serve de reserva para a
+// atribuicao quando a venda nao casa com um clique pelo sck (comprador em outro aparelho,
+// link reaberto, upsell de um clique).
+const CHAVES_UTM = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+function digUtms(o) {
+  if (!o || typeof o !== 'object') return null;
+  const lugares = [
+    o?.link?.query_params, o?.customer?.origin?.query_params, o?.link?.sources, o?.sources,
+    o?.query_params, o?.url_parameters, o?.url_params, o?.tracking, o?.checkout?.url_parameters,
+  ];
+  for (const l of lugares) {
+    if (!l || typeof l !== 'object') continue;
+    const utms = {};
+    for (const k of CHAVES_UTM) if (typeof l[k] === 'string' && l[k].trim()) utms[k] = l[k];
+    if (Object.keys(utms).length) return utms;
+  }
+  return null;
+}
+
 function normalizarPayt(payload) {
   const p = (payload && typeof payload === 'object') ? payload : {};
 
@@ -59,6 +79,7 @@ function normalizarPayt(payload) {
     txIdBruto: txId,
     sck: digSck(p) || p?.customer?.origin?.query_params?.click_id || null,
     src: digSrc(p) || null,
+    utms: digUtms(p),
     status: p?.test === true ? 'test' : status,
     // `test` chega no topo do payload real (visto no log de producao). Mesma regra da
     // Digistore24: teste grava status 'test', fora de receita, Google e reprocesso.

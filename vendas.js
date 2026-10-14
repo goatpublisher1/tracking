@@ -5,6 +5,7 @@
 // =====================================================================
 const { sendPurchase, temPixel } = require('./capi');
 const { sendCompletePayment } = require('./tiktok');
+const { normalizeUtms } = require('./normalize');
 
 async function processarVenda(pool, venda) {
   const { txId, sck, paid, value, total } = venda;
@@ -98,6 +99,21 @@ async function processarVenda(pool, venda) {
   // Mesmo fallback vale para event_log.src abaixo — os dois tem que concordar.
   const srcFinal = venda.src || store?.src || null;
 
+  // Atribuicao: o clique do checkout (pelo sck) com campanha e a verdade. Sem ele — venda sem
+  // sck do nosso, comprador em outro aparelho, upsell de um clique — vale o que a plataforma
+  // recebeu na URL do checkout (so a PayT manda; a Digistore24 nao tem utm no IPN). Antes a
+  // venda caia em "Sem origem" mesmo com a campanha inteira na URL.
+  // try: decodeURIComponent lanca com "%" solto, e nada aqui pode impedir o INSERT da venda.
+  let daUrl = null;
+  try {
+    daUrl = venda.utms ? normalizeUtms(venda.utms) : null;
+  } catch (e) {
+    console.warn('UTM_DA_URL_INVALIDA', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
+  }
+  const atrib = (click && click.campaign_id ? click : null)
+    || (daUrl && daUrl.campaign_id ? daUrl : null)
+    || click || daUrl || null;
+
   await pool.query(
     `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
        currency, product_code, product_name, customer_email, customer_phone,
@@ -144,8 +160,8 @@ async function processarVenda(pool, venda) {
     [txId, 'purchase_' + txId, sck, srcFinal, venda.status,
      value, total, funnel?.currency || 'BRL',
      venda.productCode, venda.productName, venda.email, venda.phone,
-     click?.utm_source, click?.utm_campaign, click?.campaign_id,
-     click?.adset_id, click?.ad_id, funnel ? funnel.id : null, offerType,
+     atrib?.utm_source, atrib?.utm_campaign, atrib?.campaign_id,
+     atrib?.adset_id, atrib?.ad_id, funnel ? funnel.id : null, offerType,
      venda.paymentMethod, venda.paidAt, venda.upsellFrom,
      (store?.city || venda.city || null), (store?.state || venda.state || null),
      (store?.country || venda.country || null),

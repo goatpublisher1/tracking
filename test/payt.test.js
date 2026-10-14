@@ -103,3 +103,11 @@ test('test:true no topo do payload grava status test e paid false', () => {
   assert.strictEqual(v.teste, true);
   assert.strictEqual(normalizarPayt({ status: 'paid', transaction_id: 'x', test: false }).paid, true);
 });
+
+test('utms: le os utm_* que a PayT recebeu na URL do checkout; sem eles, null', () => {
+  const comUtm = { ...payload, link: { query_params: { sck: 'idx_abc123', src: 'fb1',
+    utm_source: 'FB', utm_campaign: 'Camp|111', utm_medium: 'Conj|222', utm_content: 'Ad|333', utm_term: 'Instagram_Reels' } } };
+  const v = normalizarPayt(comUtm);
+  assert.deepStrictEqual(v.utms, { utm_source: 'FB', utm_campaign: 'Camp|111', utm_medium: 'Conj|222', utm_content: 'Ad|333', utm_term: 'Instagram_Reels' });
+  assert.strictEqual(normalizarPayt(payload).utms, null);
+});
