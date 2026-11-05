@@ -2,19 +2,20 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { normalizarHw, traduzirStatus } = require('../hw');
 
-// Corpo de exemplo, com os nomes de campo que o nosso mapeamento na H&W define.
+// Corpo de exemplo, com os nomes de campo do postback salvo na H&W (os padrao dela).
 function b(extra = {}) {
   return {
     oferta: 'off_6847681',
-    orderNumber: 'ORD-1001',
-    status: 'PAID',
-    type: 'FRONT',
-    payout: 100,
-    currency: 'USD',
-    paidAt: '2026-11-05T15:01:33.166Z',
-    productName: 'EreVanton',
+    order_number: 'ORD-1001',
+    order_status: 'PAID',
+    order_type: 'FRONT',
+    order_payout: 100,
+    order_currency: 'USD',
+    order_paid_at: '2026-11-05T15:01:33.166Z',
+    order_created_at: '2026-11-05T15:00:10.000Z',
+    product_name: 'EreVanton',
     sck: 'idx_mh5k2p_abc123def',
-    checkoutUrl: 'https://order.wealthpay.io/sca1ml7aemkd?affid=aff8022827&sck=idx_outro_xyz',
+    order_checkout_url: 'https://order.wealthpay.io/sca1ml7aemkd?affid=aff8022827&sck=idx_outro_xyz',
     utm_source: 'FB',
     utm_campaign: 'SWH | ABO|120230000000000001',
     utm_medium: 'Conjunto|120230000000000002',
@@ -43,7 +44,7 @@ test('funil da URL, upsell, nunca Meta', () => {
 test('sck do campo personalizado primeiro; sem ele, o da URL do checkout', () => {
   assert.strictEqual(normalizarHw(b(), q).sck, 'idx_mh5k2p_abc123def');
   assert.strictEqual(normalizarHw(b({ sck: '' }), q).sck, 'idx_outro_xyz');
-  assert.strictEqual(normalizarHw(b({ sck: undefined, checkoutUrl: 'nao e url' }), q).sck, null);
+  assert.strictEqual(normalizarHw(b({ sck: undefined, order_checkout_url: 'nao e url' }), q).sck, null);
 });
 
 test('utm_* vazios ficam fora; nenhum vira null', () => {
@@ -60,15 +61,15 @@ test('status: pago por padrao, o contrario so quando a H&W diz', () => {
   assert.strictEqual(traduzirStatus('chargeback'), 'chargeback');
   assert.strictEqual(traduzirStatus('PENDING'), 'pending');
   assert.strictEqual(traduzirStatus('payment_failed'), 'canceled');
-  assert.strictEqual(normalizarHw(b({ status: 'REFUNDED' }), q).paid, false);
+  assert.strictEqual(normalizarHw(b({ order_status: 'REFUNDED' }), q).paid, false);
 });
 
 test('numero do pedido numerico tambem vira txId', () => {
-  assert.strictEqual(normalizarHw(b({ orderNumber: 12345 }), q).txId, 'hw_12345');
+  assert.strictEqual(normalizarHw(b({ order_number: 12345 }), q).txId, 'hw_12345');
 });
 
 test('sem pedido: txId e status nulos; valor nao numerico vira 0', () => {
-  const v = normalizarHw(b({ orderNumber: undefined, payout: 'abc' }), q);
+  const v = normalizarHw(b({ order_number: undefined, order_payout: 'abc' }), q);
   assert.strictEqual(v.txId, null);
   assert.strictEqual(v.status, null);
   assert.strictEqual(v.paid, false);

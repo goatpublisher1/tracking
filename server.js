@@ -416,7 +416,7 @@ app.post('/webhook/hw', async (req, res) => {
 
     if (!tokenValido(String(q.token || ''), process.env.HW_POSTBACK_TOKEN || '')) {
       console.warn('HW_AUTH_NEGADO', JSON.stringify({
-        ip: req.ip, presente: !!q.token, tx: (req.body && req.body.orderNumber) || null,
+        ip: req.ip, presente: !!q.token, tx: (req.body && req.body.order_number) || null,
       }));
       return res.sendStatus(401);
     }
@@ -437,7 +437,7 @@ app.post('/webhook/hw', async (req, res) => {
       return res.json({ ok: false });
     }
     if (venda.paid && !(venda.value > 0)) {
-      console.error('HW_SEM_VALOR', JSON.stringify({ tx: venda.txIdBruto, payout: req.body.payout }));
+      console.error('HW_SEM_VALOR', JSON.stringify({ tx: venda.txIdBruto, payout: req.body.order_payout }));
     }
     // processarVenda grava funnel.currency sem converter: o SWH e USD.
     if (venda.currency && venda.currency.toUpperCase() !== 'USD') {

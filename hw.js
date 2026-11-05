@@ -3,8 +3,8 @@
 //
 //  Mesmo papel do digistore24-afiliado.js (comissao de produto de terceiro,
 //  funil fixo na URL, nunca vai para a Meta), com duas diferencas:
-//   - POST com JSON, e os nomes dos campos sao escolha nossa (mapeamento do
-//     postback no painel da H&W, ver HANDOFF.md);
+//   - POST com JSON; os campos sao os que escolhemos no postback da H&W, com
+//     os nomes padrao dela (ver HANDOFF.md);
 //   - traz o clique: a H&W guarda os parametros da URL do checkout e o
 //     postback devolve qualquer um como "campo personalizado". O header ja poe
 //     sck e utm_* em todo link da pagina, entao a venda acha a campanha.
@@ -52,8 +52,8 @@ function normalizarHw(body, query) {
   const p = (body && typeof body === 'object' && !Array.isArray(body)) ? body : {};
   const q = (query && typeof query === 'object' && !Array.isArray(query)) ? query : {};
 
-  const txBruto = texto(p.orderNumber);
-  const statusBruto = texto(p.status);
+  const txBruto = texto(p.order_number);
+  const statusBruto = texto(p.order_status);
   const status = txBruto ? traduzirStatus(statusBruto) : null;
   const oferta = texto(p.oferta);
 
@@ -68,14 +68,14 @@ function normalizarHw(body, query) {
     statusBruto,
     paid: status === 'paid',
     teste: false,
-    value: num(p.payout),     // a comissao: a nossa receita nesta venda
+    value: num(p.order_payout),     // a comissao: a nossa receita nesta venda
     total: 0,                 // o postback nao tem o bruto pago pelo cliente
-    currency: texto(p.currency),
+    currency: texto(p.order_currency),
     // A oferta vem como campo fixo do postback: e o codigo cadastrado no funil
     // (send_to_meta = false), que tira a venda do "Vendas real" do Meta.
     productCode: oferta ? PREFIXO + oferta : null,
-    productName: texto(p.productName),
-    paidAt: texto(p.paidAt),
+    productName: texto(p.product_name),
+    paidAt: texto(p.order_paid_at),
     upsellFrom: null,
 
     funnelSlug: texto(q.funil),
@@ -84,7 +84,7 @@ function normalizarHw(body, query) {
     enviarMeta: false,
     offerType: 'upsell',
 
-    sck: texto(p.sck) || sckDaUrl(p.checkoutUrl),
+    sck: texto(p.sck) || sckDaUrl(p.order_checkout_url),
     src: null,
     utms: Object.keys(utms).length ? utms : null,
     email: null,
