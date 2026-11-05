@@ -9,6 +9,7 @@ domínio dela.
 - `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase (e o `CompletePayment` da TikTok, se o produto tiver `send_to_tiktok`)
 - `POST /webhook/digistore24` — IPN de venda da Digistore24 (também manda `CompletePayment` à TikTok)
 - `GET /webhook/digistore24-afiliado` — postback S2S de comissao de afiliado da Digistore24
+- `POST /webhook/hw` — postback de comissão de afiliado da H&W Hub (EreVanton, upsell do SWH)
 - `GET /health`
 
 ## Variáveis de ambiente
@@ -20,6 +21,7 @@ domínio dela.
 | `DIGISTORE_IPN_PASSPHRASE` | sim (se usar Digistore24) | Passphrase de IPN configurada na conta Digistore24. O webhook valida a assinatura `sha_sign` do payload contra ela. |
 | `DIGISTORE_AUTH_ENFORCE` | não | `1` rejeita IPN com assinatura inválida (401). Ausente = só loga. Kill switch. **Não ligue** enquanto o log mostrar `DIGISTORE_AUTH_NEGADO` em IPN real: em 2026-09-11 eram 34 de 34. O log `DIGISTORE_ASSINATURA_OK <variante>` diz qual algoritmo bate (`estrita` ou `sem_vazios`, esta a do guia). |
 | `DIGISTORE_AFILIADO_TOKEN` | sim (se usar o postback de afiliado) | Token da URL do postback S2S de afiliado (`?token=`), gerado por nós. Token errado devolve 401 sempre — sem kill switch, o postback não assina o payload. |
+| `HW_POSTBACK_TOKEN` | sim (se usar o postback da H&W) | Token da URL do postback da H&W Hub (`?token=`), gerado por nós. Token errado devolve 401 sempre. |
 | `CORS_ALLOWLIST_ENFORCE` | não | `1` restringe `/collect` à allowlist de `funnels.domain`: origem fora da lista recebe 403 e não grava. Ausente = origem refletida (permissivo), mas loga `CORS_ORIGEM_NEGADA`. Kill switch. |
 | `META_TEST_EVENT_CODE` | não | Código da aba *Testar eventos* do Gerenciador de Eventos. Com ele definido, todo evento da CAPI sai com `test_event_code` e aparece lá em tempo real, **sem contar para otimização**. Só para conferir; em produção fica vazio. |
 | `CAPI_IC_DESLIGADO` | não | `1` desliga o InitiateCheckout pela CAPI (o do pixel continua). Kill switch; nasce ligado. |
@@ -90,6 +92,8 @@ Coolify → Application → Dockerfile. Rollback = `git revert` + redeploy.
 - **Slug de funil digitado errado na URL do postback de afiliado:** procure
   `AFILIADO_FUNIL_NAO_ENCONTRADO` — `funil` presente mas sem funil ativo com
   esse slug.
+- **Comissão da H&W recusada:** cheque `HW_AUTH_NEGADO` — confira `HW_POSTBACK_TOKEN` e a URL do postback no painel da H&W.
+- **Postback da H&W sem funil, sem pedido ou sem valor:** procure `HW_SEM_FUNIL`, `HW_SEM_PEDIDO`, `HW_SEM_VALOR`; funil digitado errado: `HW_FUNIL_NAO_ENCONTRADO`; moeda que não é USD: `HW_MOEDA_DIFERENTE`. Cada chamada loga `HW_POSTBACK` com o status cru da H&W.
 
 ## Vendas de teste e reprocesso (auditoria 2026-09-11)
 - Teste (`api_mode=test` na Digistore24, `test:true` na PayT) grava `sales.status='test'`, nunca `paid`:

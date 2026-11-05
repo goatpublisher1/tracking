@@ -643,6 +643,31 @@ Canal separado do IPN de venda documentado acima: é o postback da conta de afil
 4. **O que registrar como aceito:** o token viaja na query string e aparece em log de acesso do proxy. É o único formato que a Digistore24 oferece neste canal. Rotacionar é trocar a variável e a URL.
 5. **O que não fazer:** não cadastrar os produtos da parceria no dashboard. Eles são de terceiro, o `send_to_meta` deles não seria respeitado como salvaguarda (a rota já força), e o cadastro só criaria a impressão de que o IPN de venda está apontado para nós — não está.
 
+### Postback de afiliado da H&W Hub (`/webhook/hw`)
+
+EreVanton (oferta `off_6847681`, CPA US$ 100) vendido como upsell do SWH, pelo link de afiliado da H&W (checkout em `order.wealthpay.io`). Mesmo desenho do canal acima: funil e token na URL, nunca vai para a Meta (`enviarMeta: false`), `offer_type = 'upsell'`. Diferença: o postback devolve os parâmetros da URL do checkout como "campo personalizado", então a venda traz o `sck` e os `utm_*` que o header pôs no link — e cai na campanha certa.
+
+Usamos o **Postback** da H&W (Integrações › Postback), não o Webhook: o webhook tem formato fixo e não documentado; o postback deixa escolher os nomes dos campos e mapear parâmetros da URL.
+
+1. **A variável.** `HW_POSTBACK_TOKEN` no serviço de tracking no Coolify, com *Available at Runtime*. Gere no terminal e cole direto no campo:
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+   ```
+   Antes de ligar o postback: chamada com token errado toma 401 e não se sabe se a H&W reenvia.
+2. **O postback na H&W** (Novo postback): método POST, modo *Offer* só com o EreVanton, tipo Normal, gatilho **Pedido concluído**. URL:
+   ```
+   https://track.chemistrysystem.com/webhook/hw?funil=chemistrysystem-fb1&token=SEU_TOKEN
+   ```
+   Campos (destino ← origem): `oferta` ← fixo `off_6847681`; `sck` ← campo personalizado `sck`; `orderNumber` ← sale.orderNumber; `status` ← sale.status; `type` ← sale.type; `payout` ← sale.payout; `currency` ← sale.currency; `paidAt` ← sale.paidAt; `checkoutUrl` ← sale.checkoutUrl; `productName` ← products.[].name; `utm_source`, `utm_medium`, `utm_campaign`, `utm_content`, `utm_term` ← sale.utm.*. Os nomes de destino têm que casar com o que `normalizarHw` lê.
+3. **O produto no funil.** `hw_off_6847681` cadastrado no SWH (`chemistrysystem-fb1`) como **upsell**, sem envio para Meta, Google e TikTok. O cadastro com `send_to_meta = false` é o que tira a venda do "Vendas real" do Meta na tela de Campanhas (a receita continua contando). Diferente do canal da Digistore24 acima, aqui o cadastro é necessário: a venda chega com campanha.
+4. **O link.** O botão do EreVanton tem que estar numa página com o header de tracking do SWH, no mesmo domínio do clique — é o header que põe `sck` e `utm_*` no link de afiliado.
+5. **Como conferir** depois da primeira venda:
+   ```bash
+   node scripts/q.js "SELECT transaction_id, status, value, funnel_id, offer_type, sck IS NOT NULL AS sck, campaign_id, plataforma FROM sales WHERE plataforma = 'hw' ORDER BY id DESC LIMIT 5"
+   ```
+   E o log `HW_POSTBACK` traz o `status` cru da H&W: o vocabulário não é documentado (`traduzirStatus` trata como pago tudo que não disser reembolso, chargeback, pendente ou falha).
+6. **Limites aceitos:** a H&W não tem evento de reembolso no postback, então reembolso não aparece. O postback não traz o valor bruto (`total = 0`). Não há marcação de teste: se usar um botão de teste da H&W, apague a linha depois (`DELETE FROM sales WHERE plataforma='hw' AND transaction_id='hw_<pedido do teste>'`).
+
 ## Qualidade de correspondência (CAPI completa + IC server-side)
 
 O Purchase da CAPI passa a levar geo, `external_id`, `fbc` montado do `fbclid` e o IP da venda, e o `/collect` dispara um InitiateCheckout pela CAPI a cada clique de checkout (uma linha em `event_log` por pixel, `event_name = 'InitiateCheckout'`, `event_id = sck`, `source = 'server'`, gravada em todo caso — com o status HTTP que a Meta devolveu, ou `0` quando ela não respondeu ou o evento foi pulado). O `/collect` responde primeiro; o IC sai depois, em `setImmediate`. Sem banco a mexer: não há `ALTER TABLE`.
