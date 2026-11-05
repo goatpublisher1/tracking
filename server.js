@@ -17,6 +17,7 @@ const { normalizarPayt } = require('./payt');
 const { processarVenda, herdarDoProduto } = require('./vendas');
 const { varianteDaAssinatura, normalizarDigistore } = require('./digistore24');
 const { normalizarAfiliado } = require('./digistore24-afiliado');
+const { normalizarHw } = require('./hw');
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 // Um client ocioso que recebe erro do backend (restart do Postgres, failover,
@@ -400,6 +401,65 @@ app.get('/webhook/digistore24-afiliado', async (req, res) => {
     // mesmo em erro interno respondemos OK, como nas outras rotas de webhook:
     // a alternativa e a Digistore24 reenviar o mesmo postback que ja falhou.
     res.send('OK');
+  }
+});
+
+// ---------------------------------------------------------------------
+//  /webhook/hw — Postback de afiliado da H&W Hub (EreVanton como upsell do SWH).
+//  Mesmo desenho do postback de afiliado da Digistore24: funil e token na URL,
+//  token errado devolve 401, a venda nunca vai para a Meta. O corpo e JSON com
+//  os nomes que nos mapeamos no painel da H&W (ver HANDOFF.md).
+// ---------------------------------------------------------------------
+app.post('/webhook/hw', async (req, res) => {
+  try {
+    const q = req.query || {};
+
+    if (!tokenValido(String(q.token || ''), process.env.HW_POSTBACK_TOKEN || '')) {
+      console.warn('HW_AUTH_NEGADO', JSON.stringify({
+        ip: req.ip, presente: !!q.token, tx: (req.body && req.body.orderNumber) || null,
+      }));
+      return res.sendStatus(401);
+    }
+
+    const venda = normalizarHw(req.body, q);
+    // Sem dado de comprador no log: so o que identifica a chamada.
+    console.log('HW_POSTBACK', JSON.stringify({
+      tx: venda.txIdBruto, status: venda.statusBruto, moeda: venda.currency,
+      oferta: venda.productCode, sck: !!venda.sck, utm: !!venda.utms,
+    }));
+
+    if (!venda.funnelSlug) {
+      console.error('HW_SEM_FUNIL', JSON.stringify({ tx: venda.txIdBruto }));
+      return res.json({ ok: false });
+    }
+    if (!venda.txId) {
+      console.error('HW_SEM_PEDIDO', JSON.stringify(req.body || {}).slice(0, 300));
+      return res.json({ ok: false });
+    }
+    if (venda.paid && !(venda.value > 0)) {
+      console.error('HW_SEM_VALOR', JSON.stringify({ tx: venda.txIdBruto, payout: req.body.payout }));
+    }
+    // processarVenda grava funnel.currency sem converter: o SWH e USD.
+    if (venda.currency && venda.currency.toUpperCase() !== 'USD') {
+      console.warn('HW_MOEDA_DIFERENTE', JSON.stringify({ tx: venda.txIdBruto, moeda: venda.currency }));
+    }
+
+    let resultado;
+    try {
+      resultado = await processarVenda(pool, venda);
+    } catch (e) {
+      // Falha ao GRAVAR: 500 para a H&W reenviar, se ela reenvia — a venda ainda nao esta em sales.
+      console.error('HW_GRAVACAO_FALHOU', venda.txIdBruto, String(e).slice(0, 300));
+      return res.status(500).json({ ok: false });
+    }
+    if (venda.paid && resultado && resultado.motivo === 'funnel_nao_resolvido') {
+      console.error('HW_FUNIL_NAO_ENCONTRADO', JSON.stringify({ funil: venda.funnelSlug, tx: venda.txIdBruto }));
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('hw webhook error', e);
+    res.json({ ok: false });
   }
 });
 
