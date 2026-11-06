@@ -9,7 +9,7 @@ domínio dela.
 - `POST /webhook/payt` — webhook de venda; resolve o funil e dispara o Purchase (e o `CompletePayment` da TikTok, se o produto tiver `send_to_tiktok`)
 - `POST /webhook/digistore24` — IPN de venda da Digistore24 (também manda `CompletePayment` à TikTok)
 - `GET /webhook/digistore24-afiliado` — postback S2S de comissao de afiliado da Digistore24
-- `POST /webhook/hw` — postback de comissão de afiliado da H&W Hub (EreVanton, upsell do SWH)
+- `POST /webhook/hw` — postback de comissão de afiliado da H&W Hub (EreVanton no SWH; funil CinnaShield)
 - `GET /health`
 
 ## Variáveis de ambiente

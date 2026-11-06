@@ -232,6 +232,9 @@ async function processarVenda(pool, venda) {
   // terceiro nao vai para a Meta nem se alguem cadastrar esse produto com
   // send_to_meta = true. Inflaria a otimizacao das nossas campanhas.
   if (venda.enviarMeta === false) { sendToMeta = false; sendToTikTok = false; }
+  // H&W: a Meta segue o cadastro da oferta (funil proprio manda, upsell de terceiro nao); oferta
+  // sem cadastro nao vai, como a comissao de afiliado acima.
+  if (venda.metaSoComCadastro && !produtoCadastrado) { sendToMeta = false; sendToTikTok = false; }
 
   if (!funnel) {
     const act = await pool.query('SELECT * FROM funnels WHERE active');

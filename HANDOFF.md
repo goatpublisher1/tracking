@@ -645,7 +645,7 @@ Canal separado do IPN de venda documentado acima: é o postback da conta de afil
 
 ### Postback de afiliado da H&W Hub (`/webhook/hw`)
 
-EreVanton (oferta `off_6847681`, CPA US$ 100) vendido como upsell do SWH, pelo link de afiliado da H&W (checkout em `order.wealthpay.io`). Mesmo desenho do canal acima: funil e token na URL, nunca vai para a Meta (`enviarMeta: false`), `offer_type = 'upsell'`. Diferença: o postback devolve os parâmetros da URL do checkout como "campo personalizado", então a venda traz o `sck` e os `utm_*` que o header pôs no link — e cai na campanha certa.
+EreVanton (oferta `off_6847681`, CPA US$ 100) vendido como upsell do SWH, pelo link de afiliado da H&W (checkout em `order.wealthpay.io`). Mesmo desenho do canal acima: funil e token na URL. A Meta segue o cadastro da oferta (`metaSoComCadastro`): oferta sem cadastro não vai; o EreVanton está cadastrado sem envio. O mesmo canal serve funil próprio de afiliado (CinnaShield, `cinnamondrink-fb1`, desde 2026-11-06): um postback por oferta na H&W, cada um com o próprio `funil` na URL e o próprio `oferta` fixo, e a oferta cadastrada no funil com o envio que ele pedir. Diferença: o postback devolve os parâmetros da URL do checkout como "campo personalizado", então a venda traz o `sck` e os `utm_*` que o header pôs no link — e cai na campanha certa.
 
 Usamos o **Postback** da H&W (Integrações › Postback), não o Webhook: o webhook tem formato fixo e não documentado; o postback deixa escolher os nomes dos campos e mapear parâmetros da URL.
 
