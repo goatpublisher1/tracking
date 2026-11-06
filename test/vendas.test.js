@@ -170,6 +170,43 @@ test('enviarMeta false nao chama a Meta mesmo com venda paga e funil resolvido',
   assert.strictEqual(r.motivo, 'produto_nao_envia_meta');
 });
 
+test('H&W: oferta sem cadastro nao vai para a Meta', async (t) => {
+  const fetchOriginal = global.fetch;
+  let chamou = false;
+  global.fetch = async () => { chamou = true; return { status: 200, json: async () => ({}) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+
+  const pool = fakePoolComSlug();
+  const venda = { txId: 'hw_1', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null, productCode: 'hw_off_x',
+    paid: true, status: 'paid', value: 120, total: 0, metaSoComCadastro: true, origem: 'hw' };
+  const r = await processarVenda(pool, venda);
+  assert.strictEqual(chamou, false, 'a CAPI nao podia ter sido chamada');
+  assert.strictEqual(r.motivo, 'produto_nao_envia_meta');
+});
+
+test('H&W: oferta cadastrada com send_to_meta vai para a Meta', async (t) => {
+  const fetchOriginal = global.fetch;
+  let chamadas = 0;
+  global.fetch = async () => { chamadas++; return { status: 200, json: async () => ({ events_received: 1 }) }; };
+  t.after(() => { global.fetch = fetchOriginal; });
+
+  const pool = fakePoolComSlug();
+  const consultaOriginal = pool.query;
+  pool.query = async (text, params) => {
+    if (text.includes('FROM products pr')) {
+      pool.calls.push({ text, params });
+      return { rows: [{ offer_type: 'principal', send_to_meta: true, send_to_tiktok: false, id: 7, slug: 'chemistrysystem-fb1',
+        domain: 'www.chemistrysystem.com', pixel_id: '999', capi_token: 'tok', currency: 'USD', active: true }] };
+    }
+    return consultaOriginal(text, params);
+  };
+  const venda = { txId: 'hw_2', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null, productCode: 'hw_off_y',
+    paid: true, status: 'paid', value: 120, total: 0, metaSoComCadastro: true, origem: 'hw' };
+  await processarVenda(pool, venda);
+  assert.strictEqual(chamadas, 1, 'produto cadastrado com send_to_meta vai');
+  assert.strictEqual(insertSalesArgs(pool.calls)[18], 'principal');
+});
+
 test('offerType da venda e gravado quando nao ha produto cadastrado', async () => {
   const pool = fakePoolComSlug();
   const venda = { txId: 'ds24a_3', funnelSlug: 'chemistrysystem-fb1', sck: null, src: null,

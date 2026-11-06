@@ -2,12 +2,15 @@
 //  hw.js — normalizacao do postback de afiliado da H&W Hub (hwaffiliate.com).
 //
 //  Mesmo papel do digistore24-afiliado.js (comissao de produto de terceiro,
-//  funil fixo na URL, nunca vai para a Meta), com duas diferencas:
+//  funil fixo na URL), com tres diferencas:
 //   - POST com JSON; os campos sao os que escolhemos no postback da H&W, com
 //     os nomes padrao dela (ver HANDOFF.md);
 //   - traz o clique: a H&W guarda os parametros da URL do checkout e o
 //     postback devolve qualquer um como "campo personalizado". O header ja poe
-//     sck e utm_* em todo link da pagina, entao a venda acha a campanha.
+//     sck e utm_* em todo link da pagina, entao a venda acha a campanha;
+//   - a Meta segue o cadastro do produto: o CinnaShield e o funil proprio
+//     (Purchase vai), o EreVanton e upsell do SWH (cadastrado sem envio).
+//     Oferta nao cadastrada nao vai.
 //
 //  Funcao pura: sem banco, sem rede.
 // =====================================================================
@@ -79,9 +82,9 @@ function normalizarHw(body, query) {
     upsellFrom: null,
 
     funnelSlug: texto(q.funil),
-    // Comissao de produto de terceiro nao pode inflar a otimizacao das nossas
-    // campanhas. Ver vendas.js.
-    enviarMeta: false,
+    // Sem cadastro, a comissao de terceiro nao infla a otimizacao das nossas
+    // campanhas; cadastrado, vale o send_to_meta do produto. Ver vendas.js.
+    metaSoComCadastro: true,
     offerType: 'upsell',
 
     sck: texto(p.sck) || sckDaUrl(p.order_checkout_url),

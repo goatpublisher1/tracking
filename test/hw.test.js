@@ -33,11 +33,12 @@ test('a comissao vira value; txId e productCode levam o prefixo hw_', () => {
   assert.strictEqual(v.productCode, 'hw_off_6847681');
 });
 
-test('funil da URL, upsell, nunca Meta', () => {
+test('funil da URL; Meta so com a oferta cadastrada', () => {
   const v = normalizarHw(b(), q);
   assert.strictEqual(v.funnelSlug, 'chemistrysystem-fb1');
   assert.strictEqual(v.offerType, 'upsell');
-  assert.strictEqual(v.enviarMeta, false);
+  assert.strictEqual(v.enviarMeta, undefined);
+  assert.strictEqual(v.metaSoComCadastro, true);
   assert.strictEqual(v.origem, 'hw');
 });
 
