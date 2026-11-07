@@ -162,16 +162,8 @@ async function processarVenda(pool, venda) {
   // que fica gravado: o upsell passa a ser da mesma pessoa e do mesmo clique.
   const sckEfetivo = sck || mae?.sck || null;
 
-  // ---- resolucao de funil: pixel -> sck/store -> venda-mae -> product_code -> funil unico
+  // ---- resolucao de funil: pixel -> sck/store -> funil da URL -> venda-mae -> product_code -> funil unico
   let funnel = null;
-  // Postback de afiliado: a conexao S2S e dedicada a uma parceria, entao o
-  // funil vem fixo na URL. Sem sck e sem produto cadastrado, nada abaixo
-  // resolveria, e venda com funnel_id nulo e invisivel no dashboard.
-  if (venda.funnelSlug) {
-    const r = await pool.query(
-      'SELECT * FROM funnels WHERE active AND slug = $1 LIMIT 1', [venda.funnelSlug]);
-    funnel = r.rows[0] || null;
-  }
   if (!funnel && venda.pixelId) {
     const r = await pool.query(
       'SELECT * FROM funnels WHERE active AND pixel_id = $1 LIMIT 1', [venda.pixelId]);
@@ -181,6 +173,15 @@ async function processarVenda(pool, venda) {
     const s = await pool.query('SELECT funnel_id FROM store WHERE sck=$1', [sckEfetivo]);
     if (s.rows[0]?.funnel_id)
       funnel = (await pool.query('SELECT * FROM funnels WHERE id=$1', [s.rows[0].funnel_id])).rows[0];
+  }
+  // Postback de afiliado: o funil vem fixo na URL. Sem sck e sem produto cadastrado, nada abaixo
+  // resolveria, e venda com funnel_id nulo e invisivel no dashboard. Vem DEPOIS do sck: na H&W o
+  // postback e um so por oferta, mas o funil tem varios dominios, cada um com o seu pixel — o
+  // dominio do clique (store) decide para qual pixel vai o Purchase.
+  if (!funnel && venda.funnelSlug) {
+    const r = await pool.query(
+      'SELECT * FROM funnels WHERE active AND slug = $1 LIMIT 1', [venda.funnelSlug]);
+    funnel = r.rows[0] || null;
   }
   // Upsell sem store: o funil e o da mae, antes do fallback por produto (o produto do upsell pode
   // estar cadastrado em outro funil, ou em nenhum).

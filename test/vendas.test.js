@@ -170,6 +170,25 @@ test('enviarMeta false nao chama a Meta mesmo com venda paga e funil resolvido',
   assert.strictEqual(r.motivo, 'produto_nao_envia_meta');
 });
 
+test('funil do clique (store) vem antes do funil da URL', async () => {
+  const calls = [];
+  const daUrl = { id: 7, slug: 'cinnamondrink-fb1', domain: 'cinnamondrink.shop', pixel_id: '111', capi_token: 'tok', currency: 'USD', active: true };
+  const doClique = { id: 9, slug: 'drinkcinnamon-fb1', domain: 'drinkcinnamon.shop', pixel_id: '222', capi_token: 'tok', currency: 'USD', active: true };
+  const pool = {
+    calls,
+    async query(text, params) {
+      calls.push({ text, params });
+      if (text.includes('FROM store WHERE sck')) return { rows: [{ funnel_id: 9 }] };
+      if (text.includes('FROM funnels WHERE id=$1')) return { rows: [doClique] };
+      if (text.includes('WHERE active AND slug = $1')) return { rows: [daUrl] };
+      return { rows: [] };
+    },
+  };
+  await processarVenda(pool, { txId: 'hw_3', funnelSlug: 'cinnamondrink-fb1', sck: 'idx_a_b', src: null,
+    paid: false, value: 120, total: 0, metaSoComCadastro: true, origem: 'hw' });
+  assert.strictEqual(insertSalesArgs(calls)[17], 9, 'o funil do dominio do clique decide, nao o da URL');
+});
+
 test('H&W: oferta sem cadastro nao vai para a Meta', async (t) => {
   const fetchOriginal = global.fetch;
   let chamou = false;
