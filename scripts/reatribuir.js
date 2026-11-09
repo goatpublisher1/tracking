@@ -10,7 +10,7 @@
 //    node scripts/reatribuir.js --aplicar  # grava, numa transacao
 //    node scripts/reatribuir.js --dias 15
 // =====================================================================
-const { normalizeUtms, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico } = require('../normalize');
+const { normalizeUtms, utmsDaUrl, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico } = require('../normalize');
 const { pedidoDaPrincipal } = require('../vendas');
 
 // `src` e o que o header monta juntando, nessa ordem, os utm_* nao vazios:
@@ -56,7 +56,15 @@ function cliqueCorrigido(c) {
   // campaign_id gravado que nao e numero ({campaignid} de macro): o script nao adivinha, nao mexe
   if (c.campaign_id && !idNumerico(c.campaign_id)) return null;
   let n;
-  if (ehAutomaticoSemId(c)) {
+  const daPagina = !c.campaign_id && !c.utm_source ? utmsDaUrl(c.landing_url) : null;
+  if (daPagina) {
+    // UTMs perdidas pelo header (WebView do Android): as da URL do clique, como o /collect faz hoje.
+    // utm_campaign so vai para a venda (o UPDATE do clique grava as quatro colunas de sempre).
+    let u = null;
+    try { u = normalizeUtms(daPagina); } catch (e) { return null; }
+    if (!u.utm_source && !u.campaign_id) return null;
+    n = { utm_source: u.utm_source, utm_campaign: u.utm_campaign, campaign_id: u.campaign_id, adset_id: u.adset_id, ad_id: u.ad_id };
+  } else if (ehAutomaticoSemId(c)) {
     let u = null;
     try { u = normalizeUtms({ utm_source: c.utm_source, utm_medium: c.utm_medium, utm_campaign: c.utm_campaign, utm_content: c.utm_content, utm_term: c.utm_term }); } catch (e) { return null; }
     if (!u.campaign_id) return null;
@@ -121,10 +129,11 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
   // compara com o valor exato lido.
   const { rows: cliques } = await pool.query(
     `SELECT ctid::text AS ctid, sck, created_at::text AS created_at_lido, funnel_id, utm_source, utm_medium, utm_campaign, utm_content, utm_term,
-            campaign_id, adset_id, ad_id
+            campaign_id, adset_id, ad_id, landing_url
        FROM clicks
       WHERE ${janela} AND sck IS NOT NULL
         AND ((campaign_id IS NULL AND lower(utm_medium) = 'paid')
+             OR (campaign_id IS NULL AND utm_source IS NULL AND landing_url ILIKE '%utm\\_%')
              OR campaign_id LIKE '%::%' OR adset_id LIKE '%::%' OR ad_id LIKE '%::%' OR ${fonteMeta})`, [dias, fontes]);
   // ORDER BY created_at: a mae (mais antiga) e resolvida antes do upsell, como o webhook as viu
   const { rows: vendas } = await pool.query(
@@ -150,7 +159,7 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
   const scks = [...new Set([...vendas, ...maes].map((x) => x.sck).filter(Boolean))];
   const { rows: todos } = scks.length
     ? await pool.query(
-      `SELECT sck, created_at, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adset_id, ad_id
+      `SELECT sck, created_at, utm_source, utm_medium, utm_campaign, utm_content, utm_term, campaign_id, adset_id, ad_id, landing_url
          FROM clicks WHERE sck = ANY($1::text[])`, [scks])
     : { rows: [] };
   const cliquesDoSck = new Map();

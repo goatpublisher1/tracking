@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { clickIds } = require('../normalize');
+const { clickIds, normalizeUtms, utmsDaUrl, utmsDoClique } = require('../normalize');
 
 test('clickIds devolve os tres campos saneados', () => {
   const r = clickIds({ gclid: 'Cj0KCQ', gbraid: '', wbraid: 'W1' });
@@ -113,4 +113,28 @@ test('site do Meta com campanha numerica vira FB; sem campanha (organico) fica c
 test('deepDecode: no decode abortado pelo % solto o + ainda vira espaco', () => {
   const { deepDecode } = require('../normalize');
   assert.strictEqual(deepDecode('Oferta+50%+OFF|120257'), 'Oferta 50% OFF|120257');
+});
+
+// Clique real (secretofwoman.shop, 07/11): WebView do Android, header mandou utms vazio
+const URL_WEBVIEW = 'https://www.secretofwoman.shop/vsl?utm_source=FB&utm_campaign=%5BPETRONAS-CA03%5D+%5BBID-10%5D%7C120255795897950230'
+  + '&utm_medium=01+-+%5BMAN%5D%7C120255795897940230&utm_content=AD36%7C120255795909150230&utm_term=Facebook_Mobile_Reels&utm_id=120255795897950230';
+
+test('utmsDaUrl le os utm_* da URL do clique; sem utm ou URL invalida e null', () => {
+  assert.deepStrictEqual(utmsDaUrl(URL_WEBVIEW), {
+    utm_source: 'FB', utm_medium: '01 - [MAN]|120255795897940230', utm_campaign: '[PETRONAS-CA03] [BID-10]|120255795897950230',
+    utm_content: 'AD36|120255795909150230', utm_term: 'Facebook_Mobile_Reels' });
+  assert.strictEqual(utmsDaUrl('https://x.com/vsl'), null);
+  assert.strictEqual(utmsDaUrl('https://x.com/vsl?fbclid=abc'), null);
+  assert.strictEqual(utmsDaUrl('nao e url'), null);
+  assert.strictEqual(utmsDaUrl(undefined), null);
+});
+
+test('utmsDoClique: as do corpo vencem; corpo sem utm usa a URL do clique (WebView do Android)', () => {
+  assert.deepStrictEqual(utmsDoClique({ utms: { utm_source: 'TT' }, page_location: URL_WEBVIEW }), { utm_source: 'TT' });
+  const u = normalizeUtms(utmsDoClique({ utms: { utm_source: '', utm_campaign: '' }, page_location: URL_WEBVIEW }));
+  assert.deepStrictEqual([u.utm_source, u.campaign_id, u.adset_id, u.ad_id],
+    ['FB', '120255795897950230', '120255795897940230', '120255795909150230']);
+  assert.strictEqual(utmsDoClique({ page_location: URL_WEBVIEW }).utm_source, 'FB');
+  assert.deepStrictEqual(utmsDoClique({ utms: { utm_source: '' }, page_location: 'https://x.com/vsl' }), { utm_source: '' });
+  assert.deepStrictEqual(utmsDoClique({}), {});
 });

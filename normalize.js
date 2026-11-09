@@ -136,4 +136,22 @@ function ttpDe(b) {
   return v ? v.slice(0, 200) : null;
 }
 
-module.exports = { normalizeUtms, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico };
+// utm_* da URL do clique (page_location). No WebView do Facebook/Instagram no Android a pagina carrega
+// antes de as UTMs entrarem na URL: o header manda utms vazio, mas a URL na hora do clique ja as tem.
+const UTM_CHAVES = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+function utmsDaUrl(url) {
+  let p;
+  try { p = new URL(String(url)).searchParams; } catch (e) { return null; }
+  const out = {};
+  for (const k of UTM_CHAVES) { const v = p.get(k); if (v && v.trim()) out[k] = v; }
+  return Object.keys(out).length ? out : null;
+}
+
+// UTMs do /collect: as do corpo; sem nenhuma, as da URL do clique.
+function utmsDoClique(b) {
+  const doCorpo = b && b.utms && typeof b.utms === 'object' ? b.utms : {};
+  if (UTM_CHAVES.some((k) => typeof doCorpo[k] === 'string' && doCorpo[k].trim())) return doCorpo;
+  return utmsDaUrl(b && b.page_location) || doCorpo;
+}
+
+module.exports = { normalizeUtms, utmsDaUrl, utmsDoClique, deepDecode, splitNameId, cleanSource, clickIds, ttpDe, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico };

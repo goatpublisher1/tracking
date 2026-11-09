@@ -775,6 +775,22 @@ Sem SQL e sem variável nova. Depois do deploy do tracking:
 
 Rollback: redeploy da versão anterior. Nenhuma coluna muda.
 
+## UTMs da URL do clique quando o header manda vazio (2026-11-09)
+
+No WebView do Facebook/Instagram no Android (user agent com `wv` / `Version/4.0`), a página carrega antes de as UTMs entrarem na URL. O header lê a URL no carregamento, manda `utms` vazio e `src = ''`, mas a `page_location` do clique já tem a campanha. Resultado: clique sem campanha e venda em "Sem origem". Na semana até 09/11 foram 62 de 3.826 cliques com `utm_campaign` na URL (1,6%), todos Android.
+
+O `/collect` passa a ler as UTMs da `page_location` quando o corpo chega sem nenhuma (`utmsDoClique`, `normalize.js`). Com UTMs no corpo, nada muda. O `scripts/reatribuir.js` corrige os cliques antigos do mesmo jeito: clique sem `utm_source` e sem `campaign_id` com `utm_` na `landing_url`. As vendas do mesmo `sck` herdam a campanha; o clique grava as quatro colunas de sempre (`utm_source` e os três ids).
+
+Sem SQL e sem variável nova. Depois do deploy do tracking:
+
+1. Clique novo nesse caso fica com `src` vazio e campanha preenchida:
+   ```bash
+   node scripts/q.js "SELECT count(*) FILTER (WHERE campaign_id IS NOT NULL) AS lidos_da_url, count(*) AS total FROM clicks WHERE coalesce(src, '') = '' AND landing_url ILIKE '%utm_campaign=%' AND created_at > now() - interval '1 day'"
+   ```
+2. Histórico de 30 dias: `node scripts/reatribuir.js` (simulação) e depois `--aplicar`, com o backup da seção "Reatribuir o histórico". Se o backup é do mesmo dia e de antes de uma rodada anterior, o "desfazer" volta as duas rodadas.
+
+Rollback: redeploy da versão anterior. Nenhuma coluna muda.
+
 ## Pendências conhecidas
 
 ### `sales.value` pode conter `NaN` (defeito pré-existente, anterior a esta branch)

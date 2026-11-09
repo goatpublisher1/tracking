@@ -206,6 +206,23 @@ test('Digistore24: upsell acha a principal pelo pedido sem o ultimo digito; PayT
   assert.ok(db.calls.find((c) => c.text.includes('upsell_from = ANY')).params[0].includes('LA3LVN42'));
 });
 
+test('clique com UTMs perdidas pelo header (WebView): le da landing_url, e a venda do sck ganha a campanha', async () => {
+  const url = `https://www.secretofwoman.shop/vsl?utm_source=FB&utm_campaign=Camp%7C${C}&utm_medium=Conj%7C${S}&utm_content=Ad%7C${A}&utm_term=Facebook_Mobile_Reels`;
+  const db = bancoFalso({
+    cliques: [{ sck: 'idx_w', created_at: t('10'), funnel_id: 34, utm_source: null, utm_medium: null, utm_campaign: null, utm_content: null,
+      utm_term: null, campaign_id: null, adset_id: null, ad_id: null, landing_url: url }],
+    vendas: [venda({ transaction_id: 'ds24_W', sck: 'idx_w', plataforma: 'digistore24' })],
+  });
+  await reatribuir(db, { aplicar: true, log: () => {} });
+  const c = db.cliques[0];
+  assert.deepStrictEqual([c.utm_source, c.campaign_id, c.adset_id, c.ad_id], ['FB', C, S, A]);
+  assert.deepStrictEqual(cinco(db.vendas[0]), ['FB', 'Camp', C, S, A]);
+  assert.match(db.calls.find((x) => x.text.includes('ctid::text AS ctid')).text, /landing_url ILIKE/);
+  // sem utm na URL, nada muda; clique com fonte gravada nao e relido da URL
+  assert.strictEqual(cliqueCorrigido({ utm_source: null, campaign_id: null, landing_url: 'https://x.com/vsl?fbclid=1' }), null);
+  assert.strictEqual(cliqueCorrigido({ utm_source: 'FB', campaign_id: null, landing_url: url }), null);
+});
+
 test('rodar de novo nao muda nada, e nenhum UPDATE grava id que nao seja numero', async () => {
   const db = bancoFalso({
     cliques: [

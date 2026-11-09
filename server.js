@@ -10,7 +10,7 @@
 // =====================================================================
 const express = require('express');
 const { Pool } = require('pg');
-const { normalizeUtms, clickIds, ttpDe } = require('./normalize');
+const { normalizeUtms, utmsDoClique, clickIds, ttpDe } = require('./normalize');
 const { enviarIC, enviarICTikTok } = require('./ic');
 const { tokenValido } = require('./auth');
 const { normalizarPayt } = require('./payt');
@@ -164,7 +164,8 @@ app.post('/collect', async (req, res) => {
     );
 
     // registra o clique com UTMs limpas
-    const u = normalizeUtms(b.utms || {});
+    // sem utm no corpo (WebView do Facebook/Instagram no Android), as da URL do clique
+    const u = normalizeUtms(utmsDoClique(b));
     const g = clickIds(b);
     const ins = await pool.query(
       `INSERT INTO clicks (sck, src, fbp, fbc, fbclid, ip, user_agent, landing_url,
