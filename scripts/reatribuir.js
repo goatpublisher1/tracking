@@ -11,6 +11,7 @@
 //    node scripts/reatribuir.js --dias 15
 // =====================================================================
 const { normalizeUtms, semSufixo, idNumerico, FONTES_SITE_META, metaAutomatico } = require('../normalize');
+const { pedidoDaPrincipal } = require('../vendas');
 
 // `src` e o que o header monta juntando, nessa ordem, os utm_* nao vazios:
 // source|medium|campaign|content|term — e cada um do modelo da casa e "nome|id".
@@ -127,7 +128,7 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
              OR campaign_id LIKE '%::%' OR adset_id LIKE '%::%' OR ad_id LIKE '%::%' OR ${fonteMeta})`, [dias, fontes]);
   // ORDER BY created_at: a mae (mais antiga) e resolvida antes do upsell, como o webhook as viu
   const { rows: vendas } = await pool.query(
-    `SELECT transaction_id, sck, src, ${temUtmUrl.length ? 'utm_url' : 'NULL AS utm_url'}, funnel_id, value, status, created_at, upsell_from,
+    `SELECT transaction_id, sck, src, ${temUtmUrl.length ? 'utm_url' : 'NULL AS utm_url'}, funnel_id, value, status, created_at, upsell_from, plataforma,
             utm_source, utm_campaign, campaign_id, adset_id, ad_id
        FROM sales
       WHERE ${janela}
@@ -135,8 +136,8 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
       ORDER BY created_at`, [dias, fontes]);
 
   // Venda-mae, a mesma consulta do webhook: na PayT a mae e transaction_id = upsell_from; na
-  // Digistore24, as vendas com a mesma order_id em upsell_from.
-  const pedidos = [...new Set(vendas.map((v) => v.upsell_from).filter(Boolean))];
+  // Digistore24, as vendas com a mesma order_id em upsell_from, ou o pedido da principal.
+  const pedidos = [...new Set(vendas.flatMap((v) => [v.upsell_from, pedidoDaPrincipal(v.upsell_from, v.plataforma)]).filter(Boolean))];
   const { rows: maes } = pedidos.length
     ? await pool.query(
       `SELECT transaction_id, upsell_from, sck, created_at, utm_source, utm_campaign, campaign_id, adset_id, ad_id
@@ -170,7 +171,8 @@ async function reatribuir(pool, { dias = 30, aplicar = false, log = console.log 
   // desta rodada: sem isso o upsell so herdaria a campanha da mae numa segunda rodada.
   // ponytail: busca linear em `maes` por venda; indexar por pedido se passar de milhares de upsells
   const maeDe = (v) => (v.upsell_from ? maes
-    .filter((m) => m.transaction_id !== v.transaction_id && (m.transaction_id === v.upsell_from || m.upsell_from === v.upsell_from))
+    .filter((m) => m.transaction_id !== v.transaction_id && (m.transaction_id === v.upsell_from || m.upsell_from === v.upsell_from
+      || (m.upsell_from != null && m.upsell_from === pedidoDaPrincipal(v.upsell_from, v.plataforma))))
     .map((m) => ({ ...m, ...resolvidas.get(m.transaction_id) }))
     .sort((a, b) => (temCampanha(b) - temCampanha(a)) || (ms(a.created_at) - ms(b.created_at)))[0] || null : null);
   // Ate estabilizar: a correcao de uma venda pode dar campanha a mae de outra. Venda que achou a sua

@@ -11,6 +11,14 @@ const { normalizeUtms, idNumerico } = require('./normalize');
 // ser texto, e nada no caminho do webhook pode lancar antes do INSERT.
 const idLimpo = (v) => (v == null ? null : idNumerico(String(v)));
 
+// Pedido da venda principal de um upsell da Digistore24: o order_id do upsell e o da principal com o
+// numero do upsell no fim ('LA3LVN42' -> 'LA3LVN421'). Fora da Digistore24 (ou sem digito final): null.
+// shortcut: tira so um digito (upsell 1 a 9); se aparecer pedido com 10+ upsells, tirar ate dois.
+function pedidoDaPrincipal(upsellFrom, origem) {
+  const p = upsellFrom == null ? '' : String(upsellFrom);
+  return origem === 'digistore24' && /^.{2,}\d$/.test(p) ? p.slice(0, -1) : null;
+}
+
 // Upsert da venda. Constante exportada para o scripts/verifica-sql.js conferir o texto com EXPLAIN
 // no banco de producao antes do deploy, sem gravar nada (coluna faltando = toda venda perdida).
 const SQL_UPSERT_VENDA = `INSERT INTO sales (transaction_id, event_id, sck, src, status, value, total_price,
@@ -142,17 +150,19 @@ async function processarVenda(pool, venda) {
 
   // ---- venda-mae: upsell e order bump chegam sem sck e sem utm (a plataforma cobra sem passar
   // pelo checkout de novo) e caiam em "Sem origem". A mae e quem passou pelo clique: na PayT o
-  // upsell traz o transaction_id dela em upsell_from; na Digistore24 todas as vendas do pedido
-  // trazem o mesmo order_id em upsell_from. Prefere a irma com campanha (id numerico: 'Teste' e
-  // '{campaignid}' gravados antes nao contam), depois a mais antiga.
+  // upsell traz o transaction_id dela em upsell_from; na Digistore24 as vendas do mesmo pedido trazem
+  // o mesmo order_id em upsell_from, e o upsell traz o order_id da principal com um digito a mais
+  // (pedidoDaPrincipal). Prefere a irma com campanha (id numerico: 'Teste' e '{campaignid}' gravados
+  // antes nao contam), depois a mais antiga.
   // try: nada aqui pode impedir o INSERT da venda.
   let mae = null;
   if (venda.upsellFrom) {
     try {
       const m = await pool.query(
         `SELECT sck, utm_source, utm_campaign, campaign_id, adset_id, ad_id, funnel_id FROM sales
-          WHERE transaction_id <> $1 AND (transaction_id = $2 OR upsell_from = $2)
-          ORDER BY (campaign_id ~ '^\\d{5,}$') IS TRUE DESC, created_at ASC LIMIT 1`, [txId, venda.upsellFrom]);
+          WHERE transaction_id <> $1 AND (transaction_id = $2 OR upsell_from = $2 OR upsell_from = $3)
+          ORDER BY (campaign_id ~ '^\\d{5,}$') IS TRUE DESC, created_at ASC LIMIT 1`,
+        [txId, venda.upsellFrom, pedidoDaPrincipal(venda.upsellFrom, venda.origem)]);
       mae = m.rows[0] || null;
     } catch (e) {
       console.warn('VENDA_MAE_FALHOU', JSON.stringify({ tx: txId, erro: String(e).slice(0, 120) }));
@@ -492,4 +502,4 @@ async function enviarTikTokVenda(pool, { funnel, sale, store, click, srcFinal, t
   }
 }
 
-module.exports = { processarVenda, herdarDoProduto, SQL_UPSERT_VENDA, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE };
+module.exports = { processarVenda, herdarDoProduto, pedidoDaPrincipal, SQL_UPSERT_VENDA, SQL_HERDA_FUNIL_VENDA, SQL_HERDA_FUNIL_CLIQUE };

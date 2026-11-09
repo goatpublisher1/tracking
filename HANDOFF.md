@@ -759,6 +759,22 @@ O tracking manda dois eventos à Events API da TikTok: `InitiateCheckout` (dispa
    ```
 3. Rollback: `TIKTOK_EVENTS_DESLIGADO=1` + restart.
 
+## Upsell da Digistore24 acha a venda principal (2026-11-09)
+
+Na Digistore24, o `order_id` do upsell é o da venda principal com o número do upsell no fim (`LA3LVN42` → `LA3LVN421`). A busca da venda-mãe usava o `order_id` exato e nunca achava a principal. O upsell comprado numa página que gera `sck` novo (sem o cookie do clique da VSL, como `www.chemistrysystem.com/up-bhk`) ficava sem campanha e caía em "Sem origem" no dashboard. Na semana até 09/11, só 7 de 58 upsells e 0 de 25 downsells da Digistore24 acharam a principal.
+
+`pedidoDaPrincipal` (`vendas.js`) tira o último dígito do `order_id` e a busca da venda-mãe procura também esse pedido. Só na Digistore24 (na PayT o `upsell_from` é o `transaction_id` da mãe e não muda). O `scripts/reatribuir.js` usa a mesma regra.
+
+Sem SQL e sem variável nova. Depois do deploy do tracking:
+
+1. No próximo upsell da Digistore24, confira que ele ganhou a campanha da principal:
+   ```bash
+   node scripts/q.js "SELECT transaction_id, upsell_from, offer_type, utm_source, campaign_id FROM sales WHERE plataforma = 'digistore24' AND offer_type <> 'principal' ORDER BY created_at DESC LIMIT 5"
+   ```
+2. Histórico dos últimos 30 dias: `node scripts/reatribuir.js` (simulação) e depois `--aplicar`, seguindo a seção "Reatribuir o histórico" acima, **com o backup antes**. Os upsells e downsells da Digistore24 sem campanha aparecem na simulação como "vendas que ganham campanha".
+
+Rollback: redeploy da versão anterior. Nenhuma coluna muda.
+
 ## Pendências conhecidas
 
 ### `sales.value` pode conter `NaN` (defeito pré-existente, anterior a esta branch)

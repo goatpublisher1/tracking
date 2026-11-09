@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { processarVenda, SQL_HERDA_FUNIL_VENDA } = require('../vendas');
+const { processarVenda, SQL_HERDA_FUNIL_VENDA, pedidoDaPrincipal } = require('../vendas');
 
 // Pool falso: sem funil resolvido e sem venda paga, o fluxo termina logo apos
 // o INSERT INTO sales — o suficiente para inspecionar os parametros gravados
@@ -502,7 +502,33 @@ test('upsell sem sck nem utms herda o sck, a campanha e o funil da venda-mae', a
   assert.strictEqual(a[2], 'idx_pai');
   assert.deepStrictEqual(a.slice(12, 17), ['FB', 'Camp', '111111', '222222', '333333']);
   assert.strictEqual(a[17], 1, 'sem funil pelo store, vale o funil da mae');
-  assert.deepStrictEqual(calls.find(c => c.text.includes('upsell_from = $2')).params, ['UP1', 'PAI1']);
+  assert.deepStrictEqual(calls.find(c => c.text.includes('upsell_from = $2')).params, ['UP1', 'PAI1', null]);
+});
+
+test('pedidoDaPrincipal: so na Digistore24 e so com digito final', () => {
+  assert.strictEqual(pedidoDaPrincipal('LA3LVN421', 'digistore24'), 'LA3LVN42');
+  assert.strictEqual(pedidoDaPrincipal('Z6K9TVXM1', 'digistore24'), 'Z6K9TVXM');
+  assert.strictEqual(pedidoDaPrincipal('Z6K9TVXM', 'digistore24'), null);
+  assert.strictEqual(pedidoDaPrincipal('PAI1', 'payt'), null);
+  assert.strictEqual(pedidoDaPrincipal(null, 'digistore24'), null);
+  assert.strictEqual(pedidoDaPrincipal('1', 'digistore24'), null);
+});
+
+test('upsell da Digistore24 acha a principal pelo pedido sem o ultimo digito e herda a campanha', async () => {
+  const calls = [];
+  const principal = { sck: 'idx_vsl', utm_source: 'FB', utm_campaign: 'Camp', campaign_id: '120255796175040230', adset_id: '222222', ad_id: '333333', funnel_id: 1 };
+  const pool = { calls, async query(text, params) {
+    calls.push({ text, params });
+    // o banco: so a principal tem upsell_from = 'LA3LVN42'
+    if (text.includes('upsell_from = $2')) return { rows: params[2] === 'LA3LVN42' ? [principal] : [] };
+    return { rows: [] };
+  } };
+  await processarVenda(pool, { txId: 'ds24_135846994', sck: 'idx_upsell', upsellFrom: 'LA3LVN421', paid: false, status: 'pending',
+    value: 0, total: 0, origem: 'digistore24' });
+  assert.deepStrictEqual(calls.find(c => c.text.includes('upsell_from = $2')).params, ['ds24_135846994', 'LA3LVN421', 'LA3LVN42']);
+  const a = insertSalesArgs(calls);
+  assert.strictEqual(a[2], 'idx_upsell', 'o sck proprio do upsell continua');
+  assert.deepStrictEqual(a.slice(12, 17), ['FB', 'Camp', '120255796175040230', '222222', '333333']);
 });
 
 test('clique com campanha vence clique mais novo sem campanha do mesmo sck', async () => {

@@ -189,6 +189,23 @@ test('venda-mae: upsell sem sck herda a mae corrigida na mesma rodada; rodar de 
   assert.strictEqual(updates(db.calls.slice(n)).length, 0);
 });
 
+test('Digistore24: upsell acha a principal pelo pedido sem o ultimo digito; PayT nao', async () => {
+  const db = bancoFalso({
+    vendas: [
+      venda({ transaction_id: 'ds24_U', sck: 'idx_up', upsell_from: 'LA3LVN421', plataforma: 'digistore24', created_at: t('11') }),
+      venda({ transaction_id: 'ds24_P', sck: 'idx_p', upsell_from: 'LA3LVN42', plataforma: 'digistore24', created_at: t('10'),
+        utm_source: 'FB', utm_campaign: 'Camp', campaign_id: '111111', adset_id: '222222', ad_id: '333333' }),
+      // PayT: o mesmo formato de pedido nao vira principal de ninguem
+      venda({ transaction_id: 'PT_U', upsell_from: 'PAI1', plataforma: 'payt' }),
+      venda({ transaction_id: 'PT_X', upsell_from: 'PAI', plataforma: 'payt', utm_source: 'FB', utm_campaign: 'Outra', campaign_id: '444444', adset_id: '555555', ad_id: '666666' }),
+    ],
+  });
+  await reatribuir(db, { aplicar: true, log: () => {} });
+  assert.deepStrictEqual(cinco(db.vendas[0]), ['FB', 'Camp', '111111', '222222', '333333']);
+  assert.deepStrictEqual(cinco(db.vendas[2]), [null, null, null, null, null]);
+  assert.ok(db.calls.find((c) => c.text.includes('upsell_from = ANY')).params[0].includes('LA3LVN42'));
+});
+
 test('rodar de novo nao muda nada, e nenhum UPDATE grava id que nao seja numero', async () => {
   const db = bancoFalso({
     cliques: [
