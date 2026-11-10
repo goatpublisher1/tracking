@@ -196,3 +196,31 @@ test('api_mode test grava status test e paid false', () => {
   assert.strictEqual(v.paid, false);
   assert.strictEqual(v.teste, true);
 });
+
+// Formato real (CSV da Digistore24, 10/11/2026): a Digistore24 guarda os utm_* do link do
+// checkout e os repassa no webhook. Com o header fora da VSL, eram a unica pista da campanha.
+const UTMS_REAIS = {
+  utm_source: 'FB',
+  utm_medium: '01+-+[MAN]+[USA]|120255796175060230',
+  utm_campaign: '[PETRONAS-CA03]+[ID-11]+[06/11/26]+[PURCHASE]+[SWH]+[BID]+[USA]+[CAT]+[1-1-X]|120255796175040230',
+  utm_term: 'Instagram_Reels',
+  utm_content: 'AD13-H1-G5|120255796175050230',
+};
+
+test('utm_* do IPN viram os utms da venda; vazios ficam de fora; sem nenhum, null', () => {
+  assert.deepStrictEqual(normalizarDigistore({ ...IPN, ...UTMS_REAIS }).utms, UTMS_REAIS);
+  assert.deepStrictEqual(normalizarDigistore({ ...IPN, utm_source: 'FB', utm_campaign: '  ' }).utms, { utm_source: 'FB' });
+  assert.strictEqual(normalizarDigistore(IPN).utms, null);
+});
+
+test('venda da Digistore24 sem clique ganha campanha, conjunto e anuncio pelos utm_* do IPN', async () => {
+  const { processarVenda } = require('../vendas');
+  const calls = [];
+  const pool = { calls, async query(text, params) { calls.push({ text, params }); return { rows: [] }; } };
+  const venda = { ...normalizarDigistore({ ...IPN, ...UTMS_REAIS }), paid: false, status: 'pending' };
+  await processarVenda(pool, venda);
+  const args = calls.find(c => c.text.includes('INSERT INTO sales')).params;
+  assert.deepStrictEqual(args.slice(12, 17), ['FB',
+    '[PETRONAS-CA03] [ID-11] [06/11/26] [PURCHASE] [SWH] [BID] [USA] [CAT] [1-1-X]',
+    '120255796175040230', '120255796175060230', '120255796175050230']);
+});
