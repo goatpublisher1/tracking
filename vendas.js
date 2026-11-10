@@ -319,7 +319,7 @@ async function processarVenda(pool, venda) {
 
   // Atribuicao, nesta ordem: (1) utm_* da URL do proprio checkout com campanha — e o anuncio que
   // trouxe ESTA compra, enquanto o clique do mesmo sck pode ser de dias antes, de outra campanha
-  // (so a PayT manda; a Digistore24 nao tem utm no IPN); (2) ultimo clique do sck com campanha,
+  // (PayT, H&W e Digistore24 mandam); (2) ultimo clique do sck com campanha,
   // ate a venda; (3) venda-mae com campanha (upsell); (4) ultimo clique ate a venda; (5) utm_* da
   // URL sem campanha. "Com campanha" = id numerico em todo lugar: 'Teste' e '{campaignid}'
   // gravados antes do normalize.js novo nao contam, e os tres ids saem limpos (nao numerico vira

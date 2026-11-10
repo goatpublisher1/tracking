@@ -297,6 +297,7 @@ app.post('/webhook/digistore24', async (req, res) => {
     const venda = normalizarDigistore(p);
     console.log('DIGISTORE_IPN', JSON.stringify({
       tx: venda.txIdBruto || null, status: venda.status, teste: venda.teste, sck: !!venda.sck,
+      utm: venda.utms ? Object.keys(venda.utms).length : 0,
       host: (req.headers['x-forwarded-host'] || req.headers.host || '').split(':')[0],
     }));
 

@@ -51,6 +51,17 @@ function varianteDaAssinatura(params, passphrase, recebida) {
 
 const PREFIXO = 'ds24_';
 
+// utm_* do link do checkout: a Digistore24 os guarda no pedido e repassa no webhook com estes
+// nomes (padrao de Settings > Integrations > GET parameter names). Sao a reserva da atribuicao
+// quando a venda nao casa com um clique pelo sck — em 10/11/2026 as VSLs do SWH sairam sem o
+// header e as 11 vendas do dia chegaram sem campanha, embora a Digistore24 tivesse as UTMs.
+const CHAVES_UTM = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+function utmsDoIpn(p) {
+  const utms = {};
+  for (const k of CHAVES_UTM) if (typeof p[k] === 'string' && p[k].trim()) utms[k] = p[k];
+  return Object.keys(utms).length ? utms : null;
+}
+
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
@@ -115,6 +126,7 @@ function normalizarDigistore(params) {
     paymentMethod: p.pay_method || null,
     paidAt: p.transaction_processed_at || null,
     upsellFrom: p.order_id || null,
+    utms: utmsDoIpn(p),
     ip: null,                          // o IPN nao traz o ip do comprador
     pixelId: null,
   };
